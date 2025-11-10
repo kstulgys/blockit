@@ -1,7 +1,7 @@
 "use client";
 
-import React from "react";
-import { Canvas } from "@react-three/fiber";
+import React, { useRef } from "react";
+import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls, Grid } from "@react-three/drei";
 import { Box as ChakraBox, SimpleGrid } from "@chakra-ui/react";
 import { Building3D } from "~/components/building/Building3D";
@@ -21,6 +21,8 @@ import {
   type Connection,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import * as THREE from "three";
+import type { OrbitControls as OrbitControlsType } from "three-stdlib";
 
 export default function Home() {
   return (
@@ -35,6 +37,53 @@ export default function Home() {
   );
 }
 
+function ClickToRotate() {
+  const { camera, raycaster, scene, gl } = useThree();
+  const controlsRef = useRef<OrbitControlsType | null>(null);
+
+  const handleClick = (event: MouseEvent) => {
+    // Shift + Click to set rotation center
+    if (!event.shiftKey) return;
+
+    const canvas = gl.domElement;
+    const rect = canvas.getBoundingClientRect();
+
+    // Calculate normalized device coordinates (-1 to +1)
+    const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+    // Update raycaster
+    raycaster.setFromCamera(new THREE.Vector2(x, y), camera);
+
+    // Raycast against all objects in the scene
+    const intersects = raycaster.intersectObjects(scene.children, true);
+
+    if (intersects.length > 0 && controlsRef.current) {
+      // Set orbit controls target to the clicked point
+      const point = intersects[0].point;
+      controlsRef.current.target.copy(point);
+      controlsRef.current.update();
+    }
+  };
+
+  React.useEffect(() => {
+    const canvas = gl.domElement;
+    canvas.addEventListener("click", handleClick);
+    return () => canvas.removeEventListener("click", handleClick);
+  }, [gl]);
+
+  return (
+    <OrbitControls
+      ref={controlsRef}
+      makeDefault
+      enableDamping
+      dampingFactor={0.05}
+      minDistance={2}
+      maxDistance={50}
+    />
+  );
+}
+
 function BlockitModel() {
   const handleBackgroundClick = () => {
     actions.selectWall(null);
@@ -42,15 +91,48 @@ function BlockitModel() {
 
   return (
     <div id="canvas-container" style={{ width: "100%", height: "100%" }}>
-      <Canvas camera={{ position: [5, 5, 5], fov: 50 }}>
-        <ambientLight intensity={0.5} />
-        <directionalLight position={[10, 10, 5]} intensity={1} />
+      <Canvas
+        camera={{ position: [5, 5, 5], fov: 50 }}
+        shadows
+        gl={{
+          antialias: true,
+          toneMapping: THREE.ACESFilmicToneMapping,
+          toneMappingExposure: 1,
+          outputColorSpace: THREE.SRGBColorSpace,
+        }}
+      >
+        {/* Lighting setup for architectural visualization */}
 
-        {/* Origin point marker */}
-        {/* <mesh position={[0, 0.05, 0]}>
-          <sphereGeometry args={[0.1, 16, 16]} />
-          <meshStandardMaterial color="red" />
-        </mesh> */}
+        {/* Ambient light - soft base illumination */}
+        <ambientLight intensity={0.4} />
+
+        {/* Hemisphere light - simulates sky/ground lighting */}
+        <hemisphereLight
+          color="#ffffff"
+          groundColor="#444444"
+          intensity={0.6}
+          position={[0, 50, 0]}
+        />
+
+        {/* Main directional light - sun simulation with shadows */}
+        <directionalLight
+          position={[10, 10, 5]}
+          intensity={0.8}
+          castShadow
+          shadow-mapSize-width={2048}
+          shadow-mapSize-height={2048}
+          shadow-camera-far={50}
+          shadow-camera-left={-10}
+          shadow-camera-right={10}
+          shadow-camera-top={10}
+          shadow-camera-bottom={-10}
+        />
+
+        {/* Fill light - reduces harsh shadows */}
+        <directionalLight
+          position={[-5, 5, -5]}
+          intensity={0.3}
+        />
 
         {/* Building */}
         <Building3D />
@@ -65,7 +147,6 @@ function BlockitModel() {
           sectionSize={3} // Every 10 cells (3m)
           sectionThickness={1}
           sectionColor="#3b82f6"
-          fadeDistance={50}
           fadeStrength={1}
           followCamera={false}
           infiniteGrid={false}
@@ -81,13 +162,7 @@ function BlockitModel() {
           <meshBasicMaterial transparent opacity={0} />
         </mesh>
 
-        <OrbitControls
-          makeDefault
-          enableDamping
-          dampingFactor={0.05}
-          minDistance={2}
-          maxDistance={50}
-        />
+        <ClickToRotate />
       </Canvas>
     </div>
   );

@@ -116,10 +116,16 @@ export function Wall3D({ wall, floorId }: Wall3DProps) {
         rotation={[0, -angle, 0]}
         onClick={handleClick}
         geometry={geometry}
+        castShadow
+        receiveShadow
       >
         <meshStandardMaterial
           color={isSelected ? "#3b82f6" : wall.isExterior ? "#8b7355" : "#d4c5b9"}
           roughness={0.8}
+          metalness={0}
+          side={THREE.DoubleSide}
+          depthWrite={true}
+          depthTest={true}
         />
       </mesh>
 
