@@ -1,0 +1,1 @@
+I am creating a 3D floor plan modeling application. Currently walls corners are overlaping. I want you to fix this issue. Each wall at the corner should have a 45 degree triandle cut so they connect properly without overlap. The solutions should be simple, just update each wall geometry.
