@@ -446,15 +446,38 @@ function detectCornerRequirement(
     return { requiresCorner: false, attachedInteriorWall: null, attachmentPoint: null };
   }
 
-  // If this wall is already part of a split (has parentWallId), don't create corners again
-  // The wall has already been split into L-shape, so just move the segment normally
-  // Corner creation should only happen for original unsplit walls
+  // If this wall is part of a split (has parentWallId), check if segments are aligned
+  // If all segments are at the same coordinate (straight line), reconstruction is safe
+  // If segments are at different coordinates (L-shape), don't reconstruct
   if (wall.parentWallId) {
-    return { requiresCorner: false, attachedInteriorWall: null, attachmentPoint: null };
+    const siblingSegments = floor.wallIds
+      .map(id => floor.walls[id])
+      .filter(w => w && (w.parentWallId === wall.parentWallId || w.id === wall.parentWallId));
+
+    if (siblingSegments.length > 0) {
+      // Check if all segments are aligned (at same Y for horizontal, same X for vertical)
+      const orientation = getWallOrientation(wall);
+      const allAligned = siblingSegments.every(seg => {
+        if (orientation === "horizontal") {
+          return seg.start.y === siblingSegments[0].start.y && seg.end.y === siblingSegments[0].end.y;
+        } else {
+          return seg.start.x === siblingSegments[0].start.x && seg.end.x === siblingSegments[0].end.x;
+        }
+      });
+
+      if (!allAligned) {
+        // Segments are at different coordinates (L-shape already exists)
+        // Don't reconstruct - use standard movement instead
+        return { requiresCorner: false, attachedInteriorWall: null, attachmentPoint: null };
+      }
+
+      // All segments aligned - safe to reconstruct and create L-corner
+      // Continue to check for interior wall attachment below
+    }
   }
 
-  // Original unsplit wall - check if it needs corner creation
-  if (false && wall.parentWallId) {
+  // Check if original wall or aligned split segments need corner creation
+  if (wall.parentWallId) {
     // Find sibling segments with the same parent
     const siblingSegments = floor.wallIds
       .map(id => floor.walls[id])
