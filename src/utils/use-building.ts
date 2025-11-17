@@ -446,8 +446,15 @@ function detectCornerRequirement(
     return { requiresCorner: false, attachedInteriorWall: null, attachmentPoint: null };
   }
 
-  // If this is a split wall segment (has parentWallId), check for sibling attachment
+  // If this wall is already part of a split (has parentWallId), don't create corners again
+  // The wall has already been split into L-shape, so just move the segment normally
+  // Corner creation should only happen for original unsplit walls
   if (wall.parentWallId) {
+    return { requiresCorner: false, attachedInteriorWall: null, attachmentPoint: null };
+  }
+
+  // Original unsplit wall - check if it needs corner creation
+  if (false && wall.parentWallId) {
     // Find sibling segments with the same parent
     const siblingSegments = floor.wallIds
       .map(id => floor.walls[id])
