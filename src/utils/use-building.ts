@@ -18,6 +18,9 @@ export type Wall = {
   thickness: number; // always 0.3m for now
   height: number; // wall height in meters
   isExterior: boolean;
+  isAttachmentSegment?: boolean; // Middle segment where interior wall attaches (non-selectable)
+  parentWallId?: string; // Original wall ID before splitting
+  segmentType?: "left" | "middle" | "right"; // Which segment this is
 };
 
 // Connectivity index: maps point coordinates to wall IDs at that point
@@ -44,148 +47,9 @@ export type Building = {
 
 export type WallOrientation = "horizontal" | "vertical";
 
-// Segment types for visual rendering
-export type SegmentType = "NORMAL" | "ATTACHMENT_POINT";
-
-export type WallSegment = {
-  startPos: number; // Position along wall (0 to 1)
-  endPos: number;
-  type: SegmentType;
-};
-
 // Helper function to determine wall orientation
 export function getWallOrientation(wall: Wall): WallOrientation {
   return wall.start.y === wall.end.y ? "horizontal" : "vertical";
-}
-
-// Find attachment points where interior walls intersect an exterior wall
-export function findAttachmentPoints(
-  exteriorWall: Wall,
-  floor: Floor
-): number[] {
-  const attachmentPoints: number[] = [];
-  const orientation = getWallOrientation(exteriorWall);
-
-  // Check each interior wall
-  for (const interiorWallId of floor.interiorWallIds) {
-    const interiorWall = floor.interiorWalls[interiorWallId];
-    if (!interiorWall) continue;
-
-    const interiorOrientation = getWallOrientation(interiorWall);
-
-    // Only perpendicular walls can create attachments
-    if (orientation === interiorOrientation) continue;
-
-    if (orientation === "horizontal") {
-      // Horizontal exterior wall (constant Y)
-      // Check if vertical interior wall intersects
-      const interiorX = interiorWall.start.x;
-      const exteriorY = exteriorWall.start.y;
-      const halfThickness = WALL_THICKNESS / GRID_SIZE / 2; // 0.5 grid units
-
-      // Interior wall endpoints are offset by halfThickness
-      const interiorStartY = interiorWall.start.y;
-      const interiorEndY = interiorWall.end.y;
-
-      // Check if interior wall touches this horizontal exterior wall
-      const touchesStart = Math.abs(interiorStartY - exteriorY) < halfThickness + 0.01;
-      const touchesEnd = Math.abs(interiorEndY - exteriorY) < halfThickness + 0.01;
-
-      if (touchesStart || touchesEnd) {
-        // Calculate position along exterior wall (0 to 1)
-        const wallLength = Math.abs(exteriorWall.end.x - exteriorWall.start.x);
-        const position = Math.abs(interiorX - exteriorWall.start.x) / wallLength;
-
-        if (position >= 0 && position <= 1) {
-          attachmentPoints.push(position);
-        }
-      }
-    } else {
-      // Vertical exterior wall (constant X)
-      // Check if horizontal interior wall intersects
-      const interiorY = interiorWall.start.y;
-      const exteriorX = exteriorWall.start.x;
-      const halfThickness = WALL_THICKNESS / GRID_SIZE / 2;
-
-      const interiorStartX = interiorWall.start.x;
-      const interiorEndX = interiorWall.end.x;
-
-      const touchesStart = Math.abs(interiorStartX - exteriorX) < halfThickness + 0.01;
-      const touchesEnd = Math.abs(interiorEndX - exteriorX) < halfThickness + 0.01;
-
-      if (touchesStart || touchesEnd) {
-        const wallLength = Math.abs(exteriorWall.end.y - exteriorWall.start.y);
-        const position = Math.abs(interiorY - exteriorWall.start.y) / wallLength;
-
-        if (position >= 0 && position <= 1) {
-          attachmentPoints.push(position);
-        }
-      }
-    }
-  }
-
-  return attachmentPoints.sort((a, b) => a - b);
-}
-
-// Calculate segments for a wall based on attachment points
-export function calculateWallSegments(
-  wall: Wall,
-  floor: Floor
-): WallSegment[] {
-  // Only exterior walls can have segments
-  if (!wall.isExterior) {
-    return [{ startPos: 0, endPos: 1, type: "NORMAL" }];
-  }
-
-  const attachmentPoints = findAttachmentPoints(wall, floor);
-
-  if (attachmentPoints.length === 0) {
-    return [{ startPos: 0, endPos: 1, type: "NORMAL" }];
-  }
-
-  const segments: WallSegment[] = [];
-  const orientation = getWallOrientation(wall);
-  const wallLength = orientation === "horizontal"
-    ? Math.abs(wall.end.x - wall.start.x)
-    : Math.abs(wall.end.y - wall.start.y);
-
-  // Interior wall width in grid units (0.5)
-  const interiorWidthGridUnits = INTERIOR_WALL_THICKNESS / GRID_SIZE;
-  // Half width as a fraction of the wall length
-  const halfWidth = (interiorWidthGridUnits / 2) / wallLength;
-
-  let currentPos = 0;
-
-  for (const attachPoint of attachmentPoints) {
-    // Add normal segment before attachment point
-    if (attachPoint - halfWidth > currentPos) {
-      segments.push({
-        startPos: currentPos,
-        endPos: attachPoint - halfWidth,
-        type: "NORMAL"
-      });
-    }
-
-    // Add attachment point segment (150mm wide)
-    segments.push({
-      startPos: attachPoint - halfWidth,
-      endPos: attachPoint + halfWidth,
-      type: "ATTACHMENT_POINT"
-    });
-
-    currentPos = attachPoint + halfWidth;
-  }
-
-  // Add final normal segment
-  if (currentPos < 1) {
-    segments.push({
-      startPos: currentPos,
-      endPos: 1,
-      type: "NORMAL"
-    });
-  }
-
-  return segments;
 }
 
 // Helper function to create point key for connectivity index
@@ -271,7 +135,7 @@ function createDefaultFloorPlan(): Floor {
   };
   const interiorWallIds: string[] = [interiorWall.id];
 
-  return {
+  const floor: Floor = {
     id: "floor-0",
     level: 0,
     height: DEFAULT_WALL_HEIGHT,
@@ -281,6 +145,36 @@ function createDefaultFloorPlan(): Floor {
     interiorWallIds,
     connectivity: buildConnectivityIndex(walls),
   };
+
+  // Split exterior walls where interior wall attaches
+  const interiorWidthInGridUnits = INTERIOR_WALL_THICKNESS / GRID_SIZE; // 0.5
+
+  // Find bottom and top walls to split
+  const bottomWall = wallIds
+    .map(id => walls[id])
+    .find(w => getWallOrientation(w) === "horizontal" &&
+               w.start.y === 0);
+  const topWall = wallIds
+    .map(id => walls[id])
+    .find(w => getWallOrientation(w) === "horizontal" &&
+               w.start.y === length);
+
+  // Calculate attachment position (interior wall at x=10, wall width=20)
+  const attachmentX = 10;
+  const wallWidth = 20;
+  const attachmentPosition = attachmentX / wallWidth; // 0.5
+
+  // Split bottom wall
+  if (bottomWall) {
+    splitWallAtAttachment(floor, bottomWall.id, attachmentPosition, interiorWidthInGridUnits);
+  }
+
+  // Split top wall
+  if (topWall) {
+    splitWallAtAttachment(floor, topWall.id, attachmentPosition, interiorWidthInGridUnits);
+  }
+
+  return floor;
 }
 
 // Initial building state with one floor
@@ -384,9 +278,245 @@ function updateWallEndpoint(
   }
 }
 
+// Split a wall into 3 segments at an attachment point
+function splitWallAtAttachment(
+  floor: Floor,
+  wallId: string,
+  attachmentPosition: number, // Position along wall (0 to 1)
+  interiorWallWidth: number // Width of interior wall in grid units (0.5)
+): void {
+  const wall = floor.walls[wallId];
+  if (!wall || wall.isAttachmentSegment) return;
+
+  const orientation = getWallOrientation(wall);
+
+  // Calculate wall length to convert interior width to fraction
+  const wallLength = orientation === "horizontal"
+    ? Math.abs(wall.end.x - wall.start.x)
+    : Math.abs(wall.end.y - wall.start.y);
+
+  // Convert interior wall width from grid units to fraction of this wall's length
+  const widthAsFraction = interiorWallWidth / wallLength;
+  const halfWidth = widthAsFraction / 2;
+
+  // Calculate segment boundaries
+  const leftEnd = attachmentPosition - halfWidth;
+  const rightStart = attachmentPosition + halfWidth;
+
+  // Create 3 new wall segments
+  let leftWall: Wall;
+  let middleWall: Wall;
+  let rightWall: Wall;
+
+  if (orientation === "horizontal") {
+    // Horizontal wall splits along X axis
+    // Handle both directions (left-to-right and right-to-left)
+    const minX = Math.min(wall.start.x, wall.end.x);
+    const maxX = Math.max(wall.start.x, wall.end.x);
+    const totalLength = maxX - minX;
+    const y = wall.start.y;
+
+    // Calculate split points
+    const splitX1 = minX + totalLength * leftEnd;
+    const splitX2 = minX + totalLength * rightStart;
+
+    // Determine if wall goes left-to-right or right-to-left
+    const goesRight = wall.end.x > wall.start.x;
+
+    if (goesRight) {
+      // Left to right: start.x < end.x
+      leftWall = {
+        ...wall,
+        id: `${wallId}-left`,
+        start: { x: wall.start.x, y },
+        end: { x: splitX1, y },
+        parentWallId: wallId,
+        segmentType: "left"
+      };
+
+      middleWall = {
+        ...wall,
+        id: `${wallId}-middle`,
+        start: { x: splitX1, y },
+        end: { x: splitX2, y },
+        isAttachmentSegment: true,
+        parentWallId: wallId,
+        segmentType: "middle"
+      };
+
+      rightWall = {
+        ...wall,
+        id: `${wallId}-right`,
+        start: { x: splitX2, y },
+        end: { x: wall.end.x, y },
+        parentWallId: wallId,
+        segmentType: "right"
+      };
+    } else {
+      // Right to left: start.x > end.x
+      leftWall = {
+        ...wall,
+        id: `${wallId}-left`,
+        start: { x: wall.start.x, y },
+        end: { x: splitX2, y },
+        parentWallId: wallId,
+        segmentType: "left"
+      };
+
+      middleWall = {
+        ...wall,
+        id: `${wallId}-middle`,
+        start: { x: splitX2, y },
+        end: { x: splitX1, y },
+        isAttachmentSegment: true,
+        parentWallId: wallId,
+        segmentType: "middle"
+      };
+
+      rightWall = {
+        ...wall,
+        id: `${wallId}-right`,
+        start: { x: splitX1, y },
+        end: { x: wall.end.x, y },
+        parentWallId: wallId,
+        segmentType: "right"
+      };
+    }
+  } else {
+    // Vertical wall splits along Y axis
+    // Handle both directions (bottom-to-top and top-to-bottom)
+    const minY = Math.min(wall.start.y, wall.end.y);
+    const maxY = Math.max(wall.start.y, wall.end.y);
+    const totalLength = maxY - minY;
+    const x = wall.start.x;
+
+    // Calculate split points
+    const splitY1 = minY + totalLength * leftEnd;
+    const splitY2 = minY + totalLength * rightStart;
+
+    // Determine if wall goes bottom-to-top or top-to-bottom
+    const goesUp = wall.end.y > wall.start.y;
+
+    if (goesUp) {
+      // Bottom to top: start.y < end.y
+      leftWall = {
+        ...wall,
+        id: `${wallId}-left`,
+        start: { x, y: wall.start.y },
+        end: { x, y: splitY1 },
+        parentWallId: wallId,
+        segmentType: "left"
+      };
+
+      middleWall = {
+        ...wall,
+        id: `${wallId}-middle`,
+        start: { x, y: splitY1 },
+        end: { x, y: splitY2 },
+        isAttachmentSegment: true,
+        parentWallId: wallId,
+        segmentType: "middle"
+      };
+
+      rightWall = {
+        ...wall,
+        id: `${wallId}-right`,
+        start: { x, y: splitY2 },
+        end: { x, y: wall.end.y },
+        parentWallId: wallId,
+        segmentType: "right"
+      };
+    } else {
+      // Top to bottom: start.y > end.y
+      leftWall = {
+        ...wall,
+        id: `${wallId}-left`,
+        start: { x, y: wall.start.y },
+        end: { x, y: splitY2 },
+        parentWallId: wallId,
+        segmentType: "left"
+      };
+
+      middleWall = {
+        ...wall,
+        id: `${wallId}-middle`,
+        start: { x, y: splitY2 },
+        end: { x, y: splitY1 },
+        isAttachmentSegment: true,
+        parentWallId: wallId,
+        segmentType: "middle"
+      };
+
+      rightWall = {
+        ...wall,
+        id: `${wallId}-right`,
+        start: { x, y: splitY1 },
+        end: { x, y: wall.end.y },
+        parentWallId: wallId,
+        segmentType: "right"
+      };
+    }
+  }
+
+  // Remove original wall from connectivity
+  const startKey = pointKey(wall.start.x, wall.start.y);
+  const endKey = pointKey(wall.end.x, wall.end.y);
+  if (floor.connectivity[startKey]) {
+    floor.connectivity[startKey] = floor.connectivity[startKey].filter(id => id !== wallId);
+  }
+  if (floor.connectivity[endKey]) {
+    floor.connectivity[endKey] = floor.connectivity[endKey].filter(id => id !== wallId);
+  }
+
+  // Remove original wall
+  delete floor.walls[wallId];
+  floor.wallIds = floor.wallIds.filter(id => id !== wallId);
+
+  // Add new segments
+  floor.walls[leftWall.id] = leftWall;
+  floor.walls[middleWall.id] = middleWall;
+  floor.walls[rightWall.id] = rightWall;
+  floor.wallIds.push(leftWall.id, middleWall.id, rightWall.id);
+
+  // Update connectivity for new segments
+  const leftStartKey = pointKey(leftWall.start.x, leftWall.start.y);
+  const leftEndKey = pointKey(leftWall.end.x, leftWall.end.y);
+  const middleStartKey = pointKey(middleWall.start.x, middleWall.start.y);
+  const middleEndKey = pointKey(middleWall.end.x, middleWall.end.y);
+  const rightStartKey = pointKey(rightWall.start.x, rightWall.start.y);
+  const rightEndKey = pointKey(rightWall.end.x, rightWall.end.y);
+
+  if (!floor.connectivity[leftStartKey]) floor.connectivity[leftStartKey] = [];
+  if (!floor.connectivity[leftEndKey]) floor.connectivity[leftEndKey] = [];
+  if (!floor.connectivity[middleStartKey]) floor.connectivity[middleStartKey] = [];
+  if (!floor.connectivity[middleEndKey]) floor.connectivity[middleEndKey] = [];
+  if (!floor.connectivity[rightStartKey]) floor.connectivity[rightStartKey] = [];
+  if (!floor.connectivity[rightEndKey]) floor.connectivity[rightEndKey] = [];
+
+  floor.connectivity[leftStartKey].push(leftWall.id);
+  floor.connectivity[leftEndKey].push(leftWall.id);
+  floor.connectivity[middleStartKey].push(middleWall.id);
+  floor.connectivity[middleEndKey].push(middleWall.id);
+  floor.connectivity[rightStartKey].push(rightWall.id);
+  floor.connectivity[rightEndKey].push(rightWall.id);
+}
+
 // Actions object - all state mutations go here
 export const actions = {
   selectWall(wallId: string | null, floorId?: string | null) {
+    // Don't allow selection of attachment segments
+    if (wallId) {
+      // Check in the specified floor or all floors
+      const floorsToCheck = floorId ? [floorId] : state.floorIds;
+      for (const fId of floorsToCheck) {
+        const floor = state.floors[fId];
+        const wall = floor.walls[wallId] || floor.interiorWalls[wallId];
+        if (wall?.isAttachmentSegment) {
+          return; // Skip attachment segments - don't select them
+        }
+      }
+    }
+
     state.selectedWallId = wallId;
 
     // If wallId is provided but floorId isn't, find which floor it's on

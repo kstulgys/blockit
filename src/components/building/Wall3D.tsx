@@ -1,12 +1,4 @@
-import {
-  type Wall,
-  type WallSegment,
-  GRID_SIZE,
-  actions,
-  useBuilding,
-  calculateWallSegments,
-  getWallOrientation
-} from "~/utils/use-building";
+import { type Wall, GRID_SIZE, actions, useBuilding } from "~/utils/use-building";
 import { ThreeEvent } from "@react-three/fiber";
 import { useMemo } from "react";
 import * as THREE from "three";
@@ -14,158 +6,6 @@ import * as THREE from "three";
 interface Wall3DProps {
   wall: Wall;
   floorId: string;
-}
-
-interface SegmentMeshProps {
-  segment: WallSegment;
-  segmentIndex: number;
-  totalSegments: number;
-  wall: Wall;
-  baseLength: number;
-  angle: number;
-  startX: number;
-  startZ: number;
-  dx: number;
-  dz: number;
-  centerY: number;
-  halfThickness: number;
-  startConnected: boolean;
-  endConnected: boolean;
-  isSelected: boolean;
-  handleClick: (e: ThreeEvent<MouseEvent>) => void;
-}
-
-function SegmentMesh({
-  segment,
-  segmentIndex,
-  totalSegments,
-  wall,
-  baseLength,
-  angle,
-  startX,
-  startZ,
-  dx,
-  dz,
-  centerY,
-  halfThickness,
-  startConnected,
-  endConnected,
-  isSelected,
-  handleClick
-}: SegmentMeshProps) {
-  const { thickness, height } = wall;
-
-  // Calculate segment dimensions
-  const segmentLength = (segment.endPos - segment.startPos) * baseLength;
-  const segmentCenter = (segment.startPos + segment.endPos) / 2;
-
-  // Position along the wall
-  const t = segmentCenter;
-  const segmentCenterX = startX + dx * t;
-  const segmentCenterZ = startZ + dz * t;
-
-  // Apply extensions for connected ends (only for first and last segments)
-  const isFirstSegment = segmentIndex === 0;
-  const isLastSegment = segmentIndex === totalSegments - 1;
-
-  const segStartExtension = isFirstSegment && startConnected ? halfThickness : 0;
-  const segEndExtension = isLastSegment && endConnected ? halfThickness : 0;
-  const totalSegLength = segmentLength + segStartExtension + segEndExtension;
-
-  const segExtensionOffset = (segEndExtension - segStartExtension) / 2;
-  const finalCenterX = segmentCenterX + Math.cos(angle) * segExtensionOffset;
-  const finalCenterZ = segmentCenterZ + Math.sin(angle) * segExtensionOffset;
-
-  // Create geometry for this segment
-  const segGeometry = useMemo(() => {
-    const halfLen = totalSegLength / 2;
-    const halfHeight = height / 2;
-    const halfThick = thickness / 2;
-
-    const positions: number[] = [];
-    const indices: number[] = [];
-
-    const startFrontX = -halfLen;
-    const startBackX = (isFirstSegment && startConnected) ? -halfLen + thickness : -halfLen;
-    const endFrontX = +halfLen;
-    const endBackX = (isLastSegment && endConnected) ? +halfLen - thickness : +halfLen;
-
-    // Bottom vertices
-    positions.push(
-      startFrontX, -halfHeight, -halfThick,
-      startBackX, -halfHeight, +halfThick,
-      endBackX, -halfHeight, +halfThick,
-      endFrontX, -halfHeight, -halfThick
-    );
-
-    // Top vertices
-    positions.push(
-      startFrontX, +halfHeight, -halfThick,
-      startBackX, +halfHeight, +halfThick,
-      endBackX, +halfHeight, +halfThick,
-      endFrontX, +halfHeight, -halfThick
-    );
-
-    // Faces
-    indices.push(0, 3, 7, 0, 7, 4); // Front
-    indices.push(1, 5, 6, 1, 6, 2); // Back
-    indices.push(4, 7, 6, 4, 6, 5); // Top
-    indices.push(0, 1, 2, 0, 2, 3); // Bottom
-    indices.push(0, 4, 5, 0, 5, 1); // Start
-    indices.push(3, 2, 6, 3, 6, 7); // End
-
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geo.setIndex(indices);
-    geo.computeVertexNormals();
-
-    return geo;
-  }, [totalSegLength, height, thickness, isFirstSegment, isLastSegment, startConnected, endConnected]);
-
-  // Determine segment color
-  const getSegmentColor = () => {
-    if (isSelected) return "#3b82f6";
-    if (segment.type === "ATTACHMENT_POINT") return "#a0a0a0"; // Gray for attachment
-    return wall.isExterior ? "#8b7355" : "#d4c5b9";
-  };
-
-  return (
-    <group>
-      <mesh
-        position={[finalCenterX, centerY, finalCenterZ]}
-        rotation={[0, -angle, 0]}
-        onClick={handleClick}
-        geometry={segGeometry}
-        castShadow
-        receiveShadow
-      >
-        <meshStandardMaterial
-          color={getSegmentColor()}
-          roughness={0.8}
-          metalness={0}
-          side={THREE.DoubleSide}
-          depthWrite={true}
-          depthTest={true}
-        />
-      </mesh>
-
-      {/* Selection outline */}
-      {isSelected && (
-        <mesh
-          position={[finalCenterX, centerY, finalCenterZ]}
-          rotation={[0, -angle, 0]}
-          geometry={segGeometry}
-        >
-          <meshBasicMaterial
-            color="#60a5fa"
-            transparent
-            opacity={0.3}
-            depthTest={false}
-          />
-        </mesh>
-      )}
-    </group>
-  );
 }
 
 export function Wall3D({ wall, floorId }: Wall3DProps) {
@@ -179,13 +19,33 @@ export function Wall3D({ wall, floorId }: Wall3DProps) {
   // Check connections at each end
   const startKey = `${start.x},${start.y}`;
   const endKey = `${end.x},${end.y}`;
-  const startConnected = (floor.connectivity[startKey]?.length || 0) > 1;
-  const endConnected = (floor.connectivity[endKey]?.length || 0) > 1;
 
-  // Calculate segments for this wall
-  const segments = useMemo(() => {
-    return calculateWallSegments(wall, floor);
-  }, [wall, floor]);
+  // For split wall segments, only apply miters at 90-degree corners (not at segment junctions)
+  const checkConnection = (pointKey: string) => {
+    const connectedWallIds = floor.connectivity[pointKey] || [];
+    if (connectedWallIds.length <= 1) return false;
+
+    // If this wall is a segment, check if connected walls are also segments from same parent
+    if (wall.parentWallId) {
+      // Check if any connected wall is NOT a sibling segment
+      for (const connectedId of connectedWallIds) {
+        if (connectedId === wall.id) continue;
+        const connectedWall = floor.walls[connectedId];
+        // If connected to a non-segment or segment from different parent, it's a 90-degree corner
+        if (!connectedWall || connectedWall.parentWallId !== wall.parentWallId) {
+          return true;
+        }
+      }
+      // All connected walls are sibling segments - no miter needed
+      return false;
+    }
+
+    return true;
+  };
+
+  const startConnected = checkConnection(startKey);
+  const endConnected = checkConnection(endKey);
+
 
   // Convert grid coordinates to world coordinates
   const startX = start.x * GRID_SIZE;
@@ -274,30 +134,48 @@ export function Wall3D({ wall, floorId }: Wall3DProps) {
     actions.selectWall(wall.id, floorId);
   };
 
-  // Render each segment separately using SegmentMesh component
+  // Determine wall color
+  const getWallColor = () => {
+    if (isSelected) return "#3b82f6";
+    if (wall.isAttachmentSegment) return "#a0a0a0"; // Gray for attachment segments
+    return wall.isExterior ? "#8b7355" : "#d4c5b9";
+  };
+
   return (
     <group>
-      {segments.map((segment, index) => (
-        <SegmentMesh
-          key={`${wall.id}-segment-${index}`}
-          segment={segment}
-          segmentIndex={index}
-          totalSegments={segments.length}
-          wall={wall}
-          baseLength={baseLength}
-          angle={angle}
-          startX={startX}
-          startZ={startZ}
-          dx={dx}
-          dz={dz}
-          centerY={centerY}
-          halfThickness={halfThickness}
-          startConnected={startConnected}
-          endConnected={endConnected}
-          isSelected={isSelected}
-          handleClick={handleClick}
+      <mesh
+        position={[centerX, centerY, centerZ]}
+        rotation={[0, -angle, 0]}
+        onClick={handleClick}
+        geometry={geometry}
+        castShadow
+        receiveShadow
+      >
+        <meshStandardMaterial
+          color={getWallColor()}
+          roughness={0.8}
+          metalness={0}
+          side={THREE.DoubleSide}
+          depthWrite={true}
+          depthTest={true}
         />
-      ))}
+      </mesh>
+
+      {/* Selection outline */}
+      {isSelected && (
+        <mesh
+          position={[centerX, centerY, centerZ]}
+          rotation={[0, -angle, 0]}
+          geometry={geometry}
+        >
+          <meshBasicMaterial
+            color="#60a5fa"
+            transparent
+            opacity={0.3}
+            depthTest={false}
+          />
+        </mesh>
+      )}
     </group>
   );
 }
