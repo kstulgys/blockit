@@ -57,6 +57,141 @@ function pointKey(x: number, y: number): PointKey {
   return `${x},${y}`;
 }
 
+// Merge wall segments back into their parent walls
+function mergeSegments(floor: Floor): void {
+  const segmentsByParent: Record<string, Wall[]> = {};
+
+  // Group segments by parent
+  for (const wallId of [...floor.wallIds]) {
+    const wall = floor.walls[wallId];
+    if (wall?.parentWallId) {
+      if (!segmentsByParent[wall.parentWallId]) {
+        segmentsByParent[wall.parentWallId] = [];
+      }
+      segmentsByParent[wall.parentWallId].push(wall);
+    }
+  }
+
+  // Merge each group back into parent
+  for (const [parentId, segments] of Object.entries(segmentsByParent)) {
+    if (segments.length === 0) continue;
+
+    // Sort segments by position to find original start and end
+    const firstSegment = segments.find(s => s.segmentType === "left");
+    const lastSegment = segments.find(s => s.segmentType === "right");
+
+    if (!firstSegment || !lastSegment) continue;
+
+    // Recreate parent wall
+    const parentWall: Wall = {
+      id: parentId,
+      start: firstSegment.start,
+      end: lastSegment.end,
+      thickness: firstSegment.thickness,
+      height: firstSegment.height,
+      isExterior: firstSegment.isExterior
+    };
+
+    // Remove all segments
+    for (const segment of segments) {
+      delete floor.walls[segment.id];
+      floor.wallIds = floor.wallIds.filter(id => id !== segment.id);
+
+      // Remove from connectivity
+      const startKey = pointKey(segment.start.x, segment.start.y);
+      const endKey = pointKey(segment.end.x, segment.end.y);
+      if (floor.connectivity[startKey]) {
+        floor.connectivity[startKey] = floor.connectivity[startKey].filter(id => id !== segment.id);
+        if (floor.connectivity[startKey].length === 0) delete floor.connectivity[startKey];
+      }
+      if (floor.connectivity[endKey]) {
+        floor.connectivity[endKey] = floor.connectivity[endKey].filter(id => id !== segment.id);
+        if (floor.connectivity[endKey].length === 0) delete floor.connectivity[endKey];
+      }
+    }
+
+    // Add parent wall back
+    floor.walls[parentId] = parentWall;
+    floor.wallIds.push(parentId);
+
+    // Update connectivity
+    const startKey = pointKey(parentWall.start.x, parentWall.start.y);
+    const endKey = pointKey(parentWall.end.x, parentWall.end.y);
+    if (!floor.connectivity[startKey]) floor.connectivity[startKey] = [];
+    if (!floor.connectivity[endKey]) floor.connectivity[endKey] = [];
+    if (!floor.connectivity[startKey].includes(parentId)) {
+      floor.connectivity[startKey].push(parentId);
+    }
+    if (!floor.connectivity[endKey].includes(parentId)) {
+      floor.connectivity[endKey].push(parentId);
+    }
+  }
+}
+
+// Rebuild wall splits based on current interior wall positions
+function rebuildWallSplits(floor: Floor): void {
+  const interiorWidthInGridUnits = INTERIOR_WALL_THICKNESS / GRID_SIZE; // 0.5
+
+  for (const interiorWallId of floor.interiorWallIds) {
+    const interiorWall = floor.interiorWalls[interiorWallId];
+    if (!interiorWall) continue;
+
+    const interiorOrientation = getWallOrientation(interiorWall);
+
+    // Find exterior walls to split
+    for (const wallId of [...floor.wallIds]) {
+      const exteriorWall = floor.walls[wallId];
+      if (!exteriorWall || exteriorWall.isAttachmentSegment) continue;
+
+      const exteriorOrientation = getWallOrientation(exteriorWall);
+
+      // Only split perpendicular walls
+      if (interiorOrientation === exteriorOrientation) continue;
+
+      if (exteriorOrientation === "horizontal") {
+        // Check if vertical interior wall intersects this horizontal wall
+        const interiorX = interiorWall.start.x;
+        const exteriorY = exteriorWall.start.y;
+        const halfThickness = WALL_THICKNESS / GRID_SIZE / 2;
+
+        const touchesStart = Math.abs(interiorWall.start.y - exteriorY) < halfThickness + 0.01;
+        const touchesEnd = Math.abs(interiorWall.end.y - exteriorY) < halfThickness + 0.01;
+
+        if (touchesStart || touchesEnd) {
+          // Calculate attachment position
+          const minX = Math.min(exteriorWall.start.x, exteriorWall.end.x);
+          const maxX = Math.max(exteriorWall.start.x, exteriorWall.end.x);
+          const wallLength = maxX - minX;
+          const attachmentPosition = (interiorX - minX) / wallLength;
+
+          if (attachmentPosition >= 0 && attachmentPosition <= 1) {
+            splitWallAtAttachment(floor, wallId, attachmentPosition, interiorWidthInGridUnits);
+          }
+        }
+      } else {
+        // Check if horizontal interior wall intersects this vertical wall
+        const interiorY = interiorWall.start.y;
+        const exteriorX = exteriorWall.start.x;
+        const halfThickness = WALL_THICKNESS / GRID_SIZE / 2;
+
+        const touchesStart = Math.abs(interiorWall.start.x - exteriorX) < halfThickness + 0.01;
+        const touchesEnd = Math.abs(interiorWall.end.x - exteriorX) < halfThickness + 0.01;
+
+        if (touchesStart || touchesEnd) {
+          const minY = Math.min(exteriorWall.start.y, exteriorWall.end.y);
+          const maxY = Math.max(exteriorWall.start.y, exteriorWall.end.y);
+          const wallLength = maxY - minY;
+          const attachmentPosition = (interiorY - minY) / wallLength;
+
+          if (attachmentPosition >= 0 && attachmentPosition <= 1) {
+            splitWallAtAttachment(floor, wallId, attachmentPosition, interiorWidthInGridUnits);
+          }
+        }
+      }
+    }
+  }
+}
+
 // Helper function to create a wall
 function createWall(
   id: string,
@@ -557,12 +692,24 @@ export const actions = {
         // Keep endpoints attached to top and bottom exterior walls (inside surface)
         const bottomWall = floor.wallIds
           .map(id => floor.walls[id])
-          .find(w => getWallOrientation(w) === "horizontal" &&
-                     w.start.y === Math.min(...floor.wallIds.map(id => floor.walls[id].start.y)));
+          .find(w => {
+            const orientation = getWallOrientation(w);
+            return orientation === "horizontal" && !w.parentWallId &&
+                   w.start.y === Math.min(...floor.wallIds
+                     .map(id => floor.walls[id])
+                     .filter(w2 => !w2.parentWallId && getWallOrientation(w2) === "horizontal")
+                     .map(w2 => w2.start.y));
+          });
         const topWall = floor.wallIds
           .map(id => floor.walls[id])
-          .find(w => getWallOrientation(w) === "horizontal" &&
-                     w.start.y === Math.max(...floor.wallIds.map(id => floor.walls[id].start.y)));
+          .find(w => {
+            const orientation = getWallOrientation(w);
+            return orientation === "horizontal" && !w.parentWallId &&
+                   w.start.y === Math.max(...floor.wallIds
+                     .map(id => floor.walls[id])
+                     .filter(w2 => !w2.parentWallId && getWallOrientation(w2) === "horizontal")
+                     .map(w2 => w2.start.y));
+          });
 
         if (bottomWall) {
           wall.start.y = bottomWall.start.y + halfExteriorThickness;
@@ -571,6 +718,10 @@ export const actions = {
           wall.end.y = topWall.start.y - halfExteriorThickness;
         }
       }
+
+      // Rebuild wall splits at new interior wall position
+      mergeSegments(floor);
+      rebuildWallSplits(floor);
 
       return; // Interior walls don't update connectivity for exterior walls
     }
