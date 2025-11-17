@@ -2,7 +2,8 @@ import { proxy, useSnapshot } from "valtio";
 
 // All measurements in meters (300mm = 0.3m grid)
 export const GRID_SIZE = 0.3; // 300mm
-export const WALL_THICKNESS = 0.3; // 300mm
+export const WALL_THICKNESS = 0.3; // 300mm for exterior walls
+export const INTERIOR_WALL_THICKNESS = 0.15; // 150mm for interior walls (0.5 grid units)
 export const DEFAULT_WALL_HEIGHT = 2.7; // 2700mm standard ceiling height
 
 export type Point2D = {
@@ -26,8 +27,10 @@ type ConnectivityIndex = Record<PointKey, string[]>; // point -> wallIds
 export type Floor = {
   id: string;
   level: number; // 0 for ground floor, 1 for first floor, etc.
-  walls: Record<string, Wall>; // wallId -> Wall (O(1) access)
-  wallIds: string[]; // Ordered list for iteration/rendering
+  walls: Record<string, Wall>; // wallId -> Wall (O(1) access) - exterior walls
+  wallIds: string[]; // Ordered list for iteration/rendering - exterior walls
+  interiorWalls: Record<string, Wall>; // wallId -> Wall - interior walls
+  interiorWallIds: string[]; // Ordered list for interior walls
   connectivity: ConnectivityIndex; // point -> wallIds at that point
   height: number; // floor-to-ceiling height
 };
@@ -41,9 +44,148 @@ export type Building = {
 
 export type WallOrientation = "horizontal" | "vertical";
 
+// Segment types for visual rendering
+export type SegmentType = "NORMAL" | "ATTACHMENT_POINT";
+
+export type WallSegment = {
+  startPos: number; // Position along wall (0 to 1)
+  endPos: number;
+  type: SegmentType;
+};
+
 // Helper function to determine wall orientation
 export function getWallOrientation(wall: Wall): WallOrientation {
   return wall.start.y === wall.end.y ? "horizontal" : "vertical";
+}
+
+// Find attachment points where interior walls intersect an exterior wall
+export function findAttachmentPoints(
+  exteriorWall: Wall,
+  floor: Floor
+): number[] {
+  const attachmentPoints: number[] = [];
+  const orientation = getWallOrientation(exteriorWall);
+
+  // Check each interior wall
+  for (const interiorWallId of floor.interiorWallIds) {
+    const interiorWall = floor.interiorWalls[interiorWallId];
+    if (!interiorWall) continue;
+
+    const interiorOrientation = getWallOrientation(interiorWall);
+
+    // Only perpendicular walls can create attachments
+    if (orientation === interiorOrientation) continue;
+
+    if (orientation === "horizontal") {
+      // Horizontal exterior wall (constant Y)
+      // Check if vertical interior wall intersects
+      const interiorX = interiorWall.start.x;
+      const exteriorY = exteriorWall.start.y;
+      const halfThickness = WALL_THICKNESS / GRID_SIZE / 2; // 0.5 grid units
+
+      // Interior wall endpoints are offset by halfThickness
+      const interiorStartY = interiorWall.start.y;
+      const interiorEndY = interiorWall.end.y;
+
+      // Check if interior wall touches this horizontal exterior wall
+      const touchesStart = Math.abs(interiorStartY - exteriorY) < halfThickness + 0.01;
+      const touchesEnd = Math.abs(interiorEndY - exteriorY) < halfThickness + 0.01;
+
+      if (touchesStart || touchesEnd) {
+        // Calculate position along exterior wall (0 to 1)
+        const wallLength = Math.abs(exteriorWall.end.x - exteriorWall.start.x);
+        const position = Math.abs(interiorX - exteriorWall.start.x) / wallLength;
+
+        if (position >= 0 && position <= 1) {
+          attachmentPoints.push(position);
+        }
+      }
+    } else {
+      // Vertical exterior wall (constant X)
+      // Check if horizontal interior wall intersects
+      const interiorY = interiorWall.start.y;
+      const exteriorX = exteriorWall.start.x;
+      const halfThickness = WALL_THICKNESS / GRID_SIZE / 2;
+
+      const interiorStartX = interiorWall.start.x;
+      const interiorEndX = interiorWall.end.x;
+
+      const touchesStart = Math.abs(interiorStartX - exteriorX) < halfThickness + 0.01;
+      const touchesEnd = Math.abs(interiorEndX - exteriorX) < halfThickness + 0.01;
+
+      if (touchesStart || touchesEnd) {
+        const wallLength = Math.abs(exteriorWall.end.y - exteriorWall.start.y);
+        const position = Math.abs(interiorY - exteriorWall.start.y) / wallLength;
+
+        if (position >= 0 && position <= 1) {
+          attachmentPoints.push(position);
+        }
+      }
+    }
+  }
+
+  return attachmentPoints.sort((a, b) => a - b);
+}
+
+// Calculate segments for a wall based on attachment points
+export function calculateWallSegments(
+  wall: Wall,
+  floor: Floor
+): WallSegment[] {
+  // Only exterior walls can have segments
+  if (!wall.isExterior) {
+    return [{ startPos: 0, endPos: 1, type: "NORMAL" }];
+  }
+
+  const attachmentPoints = findAttachmentPoints(wall, floor);
+
+  if (attachmentPoints.length === 0) {
+    return [{ startPos: 0, endPos: 1, type: "NORMAL" }];
+  }
+
+  const segments: WallSegment[] = [];
+  const orientation = getWallOrientation(wall);
+  const wallLength = orientation === "horizontal"
+    ? Math.abs(wall.end.x - wall.start.x)
+    : Math.abs(wall.end.y - wall.start.y);
+
+  // Interior wall width in grid units (0.5)
+  const interiorWidthGridUnits = INTERIOR_WALL_THICKNESS / GRID_SIZE;
+  // Half width as a fraction of the wall length
+  const halfWidth = (interiorWidthGridUnits / 2) / wallLength;
+
+  let currentPos = 0;
+
+  for (const attachPoint of attachmentPoints) {
+    // Add normal segment before attachment point
+    if (attachPoint - halfWidth > currentPos) {
+      segments.push({
+        startPos: currentPos,
+        endPos: attachPoint - halfWidth,
+        type: "NORMAL"
+      });
+    }
+
+    // Add attachment point segment (150mm wide)
+    segments.push({
+      startPos: attachPoint - halfWidth,
+      endPos: attachPoint + halfWidth,
+      type: "ATTACHMENT_POINT"
+    });
+
+    currentPos = attachPoint + halfWidth;
+  }
+
+  // Add final normal segment
+  if (currentPos < 1) {
+    segments.push({
+      startPos: currentPos,
+      endPos: 1,
+      type: "NORMAL"
+    });
+  }
+
+  return segments;
 }
 
 // Helper function to create point key for connectivity index
@@ -64,7 +206,7 @@ function createWall(
     id,
     start: { x: startX, y: startY },
     end: { x: endX, y: endY },
-    thickness: WALL_THICKNESS,
+    thickness: isExterior ? WALL_THICKNESS : INTERIOR_WALL_THICKNESS,
     height: DEFAULT_WALL_HEIGHT,
     isExterior,
   };
@@ -114,12 +256,29 @@ function createDefaultFloorPlan(): Floor {
     wallIds.push(wall.id);
   }
 
+  // Add one interior wall that touches the inside surfaces of exterior walls
+  const halfExteriorThickness = WALL_THICKNESS / GRID_SIZE / 2; // 0.5 grid units
+  const interiorWall = createWall(
+    "wall-5",
+    10,
+    0 + halfExteriorThickness,  // Start at inside surface of bottom wall
+    10,
+    16 - halfExteriorThickness, // End at inside surface of top wall
+    false
+  );
+  const interiorWalls: Record<string, Wall> = {
+    [interiorWall.id]: interiorWall,
+  };
+  const interiorWallIds: string[] = [interiorWall.id];
+
   return {
     id: "floor-0",
     level: 0,
     height: DEFAULT_WALL_HEIGHT,
     walls,
     wallIds,
+    interiorWalls,
+    interiorWallIds,
     connectivity: buildConnectivityIndex(walls),
   };
 }
@@ -145,17 +304,22 @@ export function getBuildingState() {
   return state;
 }
 
-// Helper: get selected wall (O(1))
-function getSelectedWall(): { wall: Wall; floor: Floor } | null {
+// Helper: get selected wall (O(1)) - checks both exterior and interior walls
+function getSelectedWall(): { wall: Wall; floor: Floor; isInterior: boolean } | null {
   if (!state.selectedWallId || !state.selectedFloorId) return null;
 
   const floor = state.floors[state.selectedFloorId];
   if (!floor) return null;
 
-  const wall = floor.walls[state.selectedWallId];
-  if (!wall) return null;
+  // Check exterior walls first
+  let wall = floor.walls[state.selectedWallId];
+  if (wall) return { wall, floor, isInterior: false };
 
-  return { wall, floor };
+  // Check interior walls
+  wall = floor.interiorWalls[state.selectedWallId];
+  if (wall) return { wall, floor, isInterior: true };
+
+  return null;
 }
 
 // Helper function to check if two points are the same
@@ -228,7 +392,8 @@ export const actions = {
     // If wallId is provided but floorId isn't, find which floor it's on
     if (wallId && !floorId) {
       for (const fId of state.floorIds) {
-        if (state.floors[fId].walls[wallId]) {
+        const floor = state.floors[fId];
+        if (floor.walls[wallId] || floor.interiorWalls[wallId]) {
           state.selectedFloorId = fId;
           return;
         }
@@ -242,8 +407,43 @@ export const actions = {
     const selected = getSelectedWall();
     if (!selected) return;
 
-    const { wall, floor } = selected;
+    const { wall, floor, isInterior } = selected;
     const orientation = getWallOrientation(wall);
+
+    // Interior walls move independently but stay attached to exterior wall surfaces
+    if (isInterior) {
+      const halfExteriorThickness = WALL_THICKNESS / GRID_SIZE / 2; // 0.5 grid units
+
+      if (orientation === "vertical") {
+        // Vertical interior walls move left/right
+        if (direction === "left") {
+          wall.start.x -= 1;
+          wall.end.x -= 1;
+        } else if (direction === "right") {
+          wall.start.x += 1;
+          wall.end.x += 1;
+        }
+
+        // Keep endpoints attached to top and bottom exterior walls (inside surface)
+        const bottomWall = floor.wallIds
+          .map(id => floor.walls[id])
+          .find(w => getWallOrientation(w) === "horizontal" &&
+                     w.start.y === Math.min(...floor.wallIds.map(id => floor.walls[id].start.y)));
+        const topWall = floor.wallIds
+          .map(id => floor.walls[id])
+          .find(w => getWallOrientation(w) === "horizontal" &&
+                     w.start.y === Math.max(...floor.wallIds.map(id => floor.walls[id].start.y)));
+
+        if (bottomWall) {
+          wall.start.y = bottomWall.start.y + halfExteriorThickness;
+        }
+        if (topWall) {
+          wall.end.y = topWall.start.y - halfExteriorThickness;
+        }
+      }
+
+      return; // Interior walls don't update connectivity for exterior walls
+    }
 
     // Store old positions
     const oldStart = { x: wall.start.x, y: wall.start.y };
@@ -337,5 +537,44 @@ export const actions = {
     connectedAtEnd.forEach((connectedWall) => {
       updateWallEndpoint(floor, connectedWall, oldEnd, newEnd);
     });
+
+    // Update interior walls that are attached to this exterior wall
+    const halfExteriorThickness = WALL_THICKNESS / GRID_SIZE / 2; // 0.5 grid units
+
+    for (const interiorWallId of floor.interiorWallIds) {
+      const interiorWall = floor.interiorWalls[interiorWallId];
+      if (!interiorWall) continue;
+
+      const interiorOrientation = getWallOrientation(interiorWall);
+
+      // If this is a horizontal exterior wall and we have vertical interior walls
+      if (orientation === "horizontal" && interiorOrientation === "vertical") {
+        // Check if interior wall is attached to this horizontal wall
+        const isAttachedToStart = Math.abs(interiorWall.start.y - oldStart.y) < halfExteriorThickness + 0.01;
+        const isAttachedToEnd = Math.abs(interiorWall.end.y - oldStart.y) < halfExteriorThickness + 0.01;
+
+        // Update interior wall endpoints to maintain attachment
+        if (isAttachedToStart) {
+          interiorWall.start.y = newStart.y + halfExteriorThickness;
+        }
+        if (isAttachedToEnd) {
+          interiorWall.end.y = newStart.y - halfExteriorThickness;
+        }
+      }
+      // If this is a vertical exterior wall and we have horizontal interior walls
+      else if (orientation === "vertical" && interiorOrientation === "horizontal") {
+        // Check if interior wall is attached to this vertical wall
+        const isAttachedToStart = Math.abs(interiorWall.start.x - oldStart.x) < halfExteriorThickness + 0.01;
+        const isAttachedToEnd = Math.abs(interiorWall.end.x - oldStart.x) < halfExteriorThickness + 0.01;
+
+        // Update interior wall endpoints to maintain attachment
+        if (isAttachedToStart) {
+          interiorWall.start.x = newStart.x + halfExteriorThickness;
+        }
+        if (isAttachedToEnd) {
+          interiorWall.end.x = newStart.x - halfExteriorThickness;
+        }
+      }
+    }
   },
 };

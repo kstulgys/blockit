@@ -48,8 +48,14 @@ export function Building3D() {
         const floor = building.floors[floorId];
         return (
           <group key={floor.id} position={[0, floor.level * floor.height, 0]}>
+            {/* Render exterior walls */}
             {floor.wallIds.map((wallId) => {
               const wall = floor.walls[wallId];
+              return <Wall3D key={wall.id} wall={wall} floorId={floorId} />;
+            })}
+            {/* Render interior walls */}
+            {floor.interiorWallIds.map((wallId) => {
+              const wall = floor.interiorWalls[wallId];
               return <Wall3D key={wall.id} wall={wall} floorId={floorId} />;
             })}
           </group>

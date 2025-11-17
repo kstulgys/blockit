@@ -92,7 +92,7 @@ function BlockitModel() {
   return (
     <div id="canvas-container" style={{ width: "100%", height: "100%" }}>
       <Canvas
-        camera={{ position: [5, 5, 5], fov: 50 }}
+        camera={{ position: [15, 15, 15], fov: 50 }}
         shadows
         gl={{
           antialias: true,
@@ -129,10 +129,7 @@ function BlockitModel() {
         />
 
         {/* Fill light - reduces harsh shadows */}
-        <directionalLight
-          position={[-5, 5, -5]}
-          intensity={0.3}
-        />
+        <directionalLight position={[-5, 5, -5]} intensity={0.3} />
 
         {/* Building */}
         <Building3D />
