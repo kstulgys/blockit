@@ -413,6 +413,393 @@ function updateWallEndpoint(
   }
 }
 
+// Helper types for corner creation
+type CornerSegments = {
+  innerCorner: Point2D;
+  outerCorner: Point2D;
+  leftSegment: Wall;
+  middleSegment: Wall;
+  rightSegment: Wall;
+  perpendicularSegment: Wall;
+};
+
+// Detect if moving an exterior wall requires corner creation
+function detectCornerRequirement(
+  floor: Floor,
+  wall: Wall,
+  direction: "up" | "down" | "left" | "right"
+): { requiresCorner: boolean; attachedInteriorWall: Wall | null; attachmentPoint: Point2D | null } {
+  const orientation = getWallOrientation(wall);
+  const halfExteriorThickness = WALL_THICKNESS / GRID_SIZE / 2;
+
+  // Validate direction for wall orientation
+  if (orientation === "horizontal" && (direction === "left" || direction === "right")) {
+    return { requiresCorner: false, attachedInteriorWall: null, attachmentPoint: null };
+  }
+  if (orientation === "vertical" && (direction === "up" || direction === "down")) {
+    return { requiresCorner: false, attachedInteriorWall: null, attachmentPoint: null };
+  }
+
+  // If this is an attachment segment itself, no corner creation needed
+  // (interior wall moves with it)
+  if (wall.isAttachmentSegment) {
+    return { requiresCorner: false, attachedInteriorWall: null, attachmentPoint: null };
+  }
+
+  // If this is a split wall segment (has parentWallId), check for sibling attachment
+  if (wall.parentWallId) {
+    // Find sibling segments with the same parent
+    const siblingSegments = floor.wallIds
+      .map(id => floor.walls[id])
+      .filter(w => w && w.parentWallId === wall.parentWallId && w.isAttachmentSegment);
+
+    // If there's an attachment segment, find the interior wall attached to it
+    for (const attachmentSegment of siblingSegments) {
+      for (const interiorWallId of floor.interiorWallIds) {
+        const interiorWall = floor.interiorWalls[interiorWallId];
+        if (!interiorWall) continue;
+
+        const interiorOrientation = getWallOrientation(interiorWall);
+        const attachmentOrientation = getWallOrientation(attachmentSegment);
+
+        // Only perpendicular walls
+        if (orientation === interiorOrientation) continue;
+
+        if (attachmentOrientation === "horizontal") {
+          const wallY = attachmentSegment.start.y;
+          const isAttached = Math.abs(interiorWall.start.y - wallY) < halfExteriorThickness + 0.01 ||
+                             Math.abs(interiorWall.end.y - wallY) < halfExteriorThickness + 0.01;
+
+          if (isAttached) {
+            // Found interior wall attached to sibling segment
+            const interiorX = interiorWall.start.x;
+            const attachmentPoint = { x: interiorX, y: wallY };
+
+            return {
+              requiresCorner: true,
+              attachedInteriorWall: interiorWall,
+              attachmentPoint
+            };
+          }
+        } else if (attachmentOrientation === "vertical") {
+          const wallX = attachmentSegment.start.x;
+          const isAttached = Math.abs(interiorWall.start.x - wallX) < halfExteriorThickness + 0.01 ||
+                             Math.abs(interiorWall.end.x - wallX) < halfExteriorThickness + 0.01;
+
+          if (isAttached) {
+            const interiorY = interiorWall.start.y;
+            const attachmentPoint = { x: wallX, y: interiorY };
+
+            return {
+              requiresCorner: true,
+              attachedInteriorWall: interiorWall,
+              attachmentPoint
+            };
+          }
+        }
+      }
+    }
+
+    // Split segment without sibling attachment - no corner needed
+    return { requiresCorner: false, attachedInteriorWall: null, attachmentPoint: null };
+  }
+
+  // Look for interior walls attached directly to this exterior wall
+  for (const interiorWallId of floor.interiorWallIds) {
+    const interiorWall = floor.interiorWalls[interiorWallId];
+    if (!interiorWall) continue;
+
+    const interiorOrientation = getWallOrientation(interiorWall);
+
+    // Only perpendicular walls can create corners
+    if (orientation === interiorOrientation) continue;
+
+    if (orientation === "horizontal") {
+      // Horizontal exterior wall - check for vertical interior wall attachment
+      const wallY = wall.start.y;
+      const isAttachedToStart = Math.abs(interiorWall.start.y - wallY) < halfExteriorThickness + 0.01;
+      const isAttachedToEnd = Math.abs(interiorWall.end.y - wallY) < halfExteriorThickness + 0.01;
+
+      if (isAttachedToStart || isAttachedToEnd) {
+        // Check if interior wall's X coordinate is within this wall's span
+        const minX = Math.min(wall.start.x, wall.end.x);
+        const maxX = Math.max(wall.start.x, wall.end.x);
+        const interiorX = interiorWall.start.x;
+
+        if (interiorX >= minX && interiorX <= maxX) {
+          // Found an attachment - determine attachment point
+          const attachmentPoint = { x: interiorX, y: wallY };
+
+          return {
+            requiresCorner: true,
+            attachedInteriorWall: interiorWall,
+            attachmentPoint
+          };
+        }
+      }
+    } else {
+      // Vertical exterior wall - check for horizontal interior wall attachment
+      const wallX = wall.start.x;
+      const isAttachedToStart = Math.abs(interiorWall.start.x - wallX) < halfExteriorThickness + 0.01;
+      const isAttachedToEnd = Math.abs(interiorWall.end.x - wallX) < halfExteriorThickness + 0.01;
+
+      if (isAttachedToStart || isAttachedToEnd) {
+        const minY = Math.min(wall.start.y, wall.end.y);
+        const maxY = Math.max(wall.start.y, wall.end.y);
+        const interiorY = interiorWall.start.y;
+
+        if (interiorY >= minY && interiorY <= maxY) {
+          const attachmentPoint = { x: wallX, y: interiorY };
+
+          return {
+            requiresCorner: true,
+            attachedInteriorWall: interiorWall,
+            attachmentPoint
+          };
+        }
+      }
+    }
+  }
+
+  return { requiresCorner: false, attachedInteriorWall: null, attachmentPoint: null };
+}
+
+// Create L-shaped corner segments when moving an exterior wall with interior attachment
+function createCornerSegments(
+  floor: Floor,
+  wall: Wall,
+  interiorWall: Wall,
+  attachmentPoint: Point2D,
+  direction: "up" | "down" | "left" | "right",
+  moveDistance: number
+): CornerSegments {
+  const orientation = getWallOrientation(wall);
+  const halfExteriorThickness = WALL_THICKNESS / GRID_SIZE / 2;
+
+  let innerCorner: Point2D;
+  let outerCorner: Point2D;
+  let leftSegment: Wall;
+  let middleSegment: Wall;
+  let rightSegment: Wall;
+  let perpendicularSegment: Wall;
+
+  const wallId = wall.parentWallId || wall.id;
+
+  if (orientation === "horizontal") {
+    // Horizontal wall moving up/down
+    const isMovingDown = direction === "down";
+    const newY = wall.start.y + (isMovingDown ? moveDistance : -moveDistance);
+    const attachmentX = attachmentPoint.x;
+
+    // Inner corner stays at original attachment point
+    innerCorner = { x: attachmentX, y: wall.start.y };
+
+    // Outer corner is at new wall position
+    outerCorner = { x: attachmentX, y: newY };
+
+    // Split the wall into three segments: left, middle (corner), right
+    const minX = Math.min(wall.start.x, wall.end.x);
+    const maxX = Math.max(wall.start.x, wall.end.x);
+    const goesRight = wall.end.x > wall.start.x;
+
+    if (goesRight) {
+      // Left segment: from start to attachment point (at new Y)
+      leftSegment = {
+        ...wall,
+        id: `${wallId}-left`,
+        start: { x: wall.start.x, y: newY },
+        end: { x: attachmentX, y: newY },
+        parentWallId: wallId,
+        segmentType: "left"
+      };
+
+      // Middle segment: vertical segment connecting corners
+      middleSegment = {
+        ...wall,
+        id: `${wallId}-middle`,
+        start: outerCorner,
+        end: innerCorner,
+        isAttachmentSegment: true,
+        parentWallId: wallId,
+        segmentType: "middle"
+      };
+
+      // Right segment: from attachment point to end (at original Y)
+      rightSegment = {
+        ...wall,
+        id: `${wallId}-right`,
+        start: { x: attachmentX, y: wall.start.y },
+        end: { x: wall.end.x, y: wall.start.y },
+        parentWallId: wallId,
+        segmentType: "right"
+      };
+    } else {
+      // Right to left orientation (start.x > end.x)
+      // Left segment should be at smaller X values (wall.end.x)
+      // Right segment should be at larger X values (wall.start.x)
+      leftSegment = {
+        ...wall,
+        id: `${wallId}-left`,
+        start: { x: wall.end.x, y: newY },
+        end: { x: attachmentX, y: newY },
+        parentWallId: wallId,
+        segmentType: "left"
+      };
+
+      middleSegment = {
+        ...wall,
+        id: `${wallId}-middle`,
+        start: outerCorner,
+        end: innerCorner,
+        isAttachmentSegment: true,
+        parentWallId: wallId,
+        segmentType: "middle"
+      };
+
+      rightSegment = {
+        ...wall,
+        id: `${wallId}-right`,
+        start: { x: attachmentX, y: wall.start.y },
+        end: { x: wall.start.x, y: wall.start.y },
+        parentWallId: wallId,
+        segmentType: "right"
+      };
+    }
+
+    // Perpendicular segment connects the two corners
+    perpendicularSegment = middleSegment;
+
+    // Keep interior wall at original position, ending at inner corner
+    if (isMovingDown) {
+      // Wall moving down, interior wall should end at inner corner from above
+      const attachedAtStart = Math.abs(interiorWall.start.y - wall.start.y) < halfExteriorThickness + 0.01;
+      if (attachedAtStart) {
+        interiorWall.start.y = innerCorner.y + halfExteriorThickness;
+      } else {
+        interiorWall.end.y = innerCorner.y + halfExteriorThickness;
+      }
+    } else {
+      // Wall moving up, interior wall should end at inner corner from below
+      const attachedAtStart = Math.abs(interiorWall.start.y - wall.start.y) < halfExteriorThickness + 0.01;
+      if (attachedAtStart) {
+        interiorWall.start.y = innerCorner.y - halfExteriorThickness;
+      } else {
+        interiorWall.end.y = innerCorner.y - halfExteriorThickness;
+      }
+    }
+  } else {
+    // Vertical wall moving left/right
+    const isMovingRight = direction === "right";
+    const newX = wall.start.x + (isMovingRight ? moveDistance : -moveDistance);
+    const attachmentY = attachmentPoint.y;
+
+    // Inner corner stays at original attachment point
+    innerCorner = { x: wall.start.x, y: attachmentY };
+
+    // Outer corner is at new wall position
+    outerCorner = { x: newX, y: attachmentY };
+
+    // Split the wall into three segments
+    const minY = Math.min(wall.start.y, wall.end.y);
+    const maxY = Math.max(wall.start.y, wall.end.y);
+    const goesUp = wall.end.y > wall.start.y;
+
+    if (goesUp) {
+      // Bottom segment: from start to attachment point (at new X)
+      leftSegment = {
+        ...wall,
+        id: `${wallId}-left`,
+        start: { x: newX, y: wall.start.y },
+        end: { x: newX, y: attachmentY },
+        parentWallId: wallId,
+        segmentType: "left"
+      };
+
+      // Middle segment: horizontal segment connecting corners
+      middleSegment = {
+        ...wall,
+        id: `${wallId}-middle`,
+        start: outerCorner,
+        end: innerCorner,
+        isAttachmentSegment: true,
+        parentWallId: wallId,
+        segmentType: "middle"
+      };
+
+      // Top segment: from attachment point to end (at original X)
+      rightSegment = {
+        ...wall,
+        id: `${wallId}-right`,
+        start: { x: wall.start.x, y: attachmentY },
+        end: { x: wall.start.x, y: wall.end.y },
+        parentWallId: wallId,
+        segmentType: "right"
+      };
+    } else {
+      // Top to bottom orientation (start.y > end.y)
+      // Left segment should be at smaller Y values (wall.end.y, bottom)
+      // Right segment should be at larger Y values (wall.start.y, top)
+      leftSegment = {
+        ...wall,
+        id: `${wallId}-left`,
+        start: { x: newX, y: wall.end.y },
+        end: { x: newX, y: attachmentY },
+        parentWallId: wallId,
+        segmentType: "left"
+      };
+
+      middleSegment = {
+        ...wall,
+        id: `${wallId}-middle`,
+        start: outerCorner,
+        end: innerCorner,
+        isAttachmentSegment: true,
+        parentWallId: wallId,
+        segmentType: "middle"
+      };
+
+      rightSegment = {
+        ...wall,
+        id: `${wallId}-right`,
+        start: { x: wall.start.x, y: attachmentY },
+        end: { x: wall.start.x, y: wall.start.y },
+        parentWallId: wallId,
+        segmentType: "right"
+      };
+    }
+
+    perpendicularSegment = middleSegment;
+
+    // Keep interior wall at original position, ending at inner corner
+    if (isMovingRight) {
+      // Wall moving right, interior wall should end at inner corner from left
+      const attachedAtStart = Math.abs(interiorWall.start.x - wall.start.x) < halfExteriorThickness + 0.01;
+      if (attachedAtStart) {
+        interiorWall.start.x = innerCorner.x + halfExteriorThickness;
+      } else {
+        interiorWall.end.x = innerCorner.x + halfExteriorThickness;
+      }
+    } else {
+      // Wall moving left, interior wall should end at inner corner from right
+      const attachedAtStart = Math.abs(interiorWall.start.x - wall.start.x) < halfExteriorThickness + 0.01;
+      if (attachedAtStart) {
+        interiorWall.start.x = innerCorner.x - halfExteriorThickness;
+      } else {
+        interiorWall.end.x = innerCorner.x - halfExteriorThickness;
+      }
+    }
+  }
+
+  return {
+    innerCorner,
+    outerCorner,
+    leftSegment,
+    middleSegment,
+    rightSegment,
+    perpendicularSegment
+  };
+}
+
 // Split a wall into 3 segments at an attachment point
 function splitWallAtAttachment(
   floor: Floor,
@@ -726,6 +1113,230 @@ export const actions = {
       return; // Interior walls don't update connectivity for exterior walls
     }
 
+    // Special case: If this is an attachment segment being moved, interior wall moves with it
+    if (wall.isAttachmentSegment) {
+      const halfExteriorThickness = WALL_THICKNESS / GRID_SIZE / 2;
+
+      // Find the interior wall attached to this segment
+      for (const interiorWallId of floor.interiorWallIds) {
+        const interiorWall = floor.interiorWalls[interiorWallId];
+        if (!interiorWall) continue;
+
+        const interiorOrientation = getWallOrientation(interiorWall);
+
+        // Check if perpendicular
+        if (orientation !== interiorOrientation) {
+          if (orientation === "horizontal") {
+            const wallY = wall.start.y;
+            const isAttached = Math.abs(interiorWall.start.y - wallY) < halfExteriorThickness + 0.01 ||
+                               Math.abs(interiorWall.end.y - wallY) < halfExteriorThickness + 0.01;
+
+            if (isAttached) {
+              // Move interior wall with the attachment segment
+              if (direction === "up") {
+                interiorWall.start.y -= 1;
+                interiorWall.end.y -= 1;
+              } else if (direction === "down") {
+                interiorWall.start.y += 1;
+                interiorWall.end.y += 1;
+              }
+            }
+          } else if (orientation === "vertical") {
+            const wallX = wall.start.x;
+            const isAttached = Math.abs(interiorWall.start.x - wallX) < halfExteriorThickness + 0.01 ||
+                               Math.abs(interiorWall.end.x - wallX) < halfExteriorThickness + 0.01;
+
+            if (isAttached) {
+              // Move interior wall with the attachment segment
+              if (direction === "left") {
+                interiorWall.start.x -= 1;
+                interiorWall.end.x -= 1;
+              } else if (direction === "right") {
+                interiorWall.start.x += 1;
+                interiorWall.end.x += 1;
+              }
+            }
+          }
+        }
+      }
+      // Continue with standard movement for the attachment segment itself
+    }
+
+    // Check if this exterior wall movement requires corner creation
+    const cornerCheck = detectCornerRequirement(floor, wall, direction);
+
+    if (cornerCheck.requiresCorner && cornerCheck.attachedInteriorWall && cornerCheck.attachmentPoint) {
+      // If this wall is part of a split (has parentWallId), we need to:
+      // 1. Merge all sibling segments back into the original parent wall
+      // 2. Then create the new L-shaped configuration from the parent wall
+
+      let wallToMove = wall;
+
+      if (wall.parentWallId) {
+        // Find all sibling segments (including this one)
+        const siblingSegments = floor.wallIds
+          .map(id => floor.walls[id])
+          .filter(w => w && (w.parentWallId === wall.parentWallId || w.id === wall.parentWallId))
+          .sort((a, b) => {
+            // Sort by position to reconstruct original wall
+            if (getWallOrientation(a) === "horizontal") {
+              return Math.min(a.start.x, a.end.x) - Math.min(b.start.x, b.end.x);
+            } else {
+              return Math.min(a.start.y, a.end.y) - Math.min(b.start.y, b.end.y);
+            }
+          });
+
+        if (siblingSegments.length > 0) {
+          // Reconstruct the original parent wall from segments
+          // Use the outer boundaries of first and last segments
+          const firstSegment = siblingSegments[0];
+          const lastSegment = siblingSegments[siblingSegments.length - 1];
+
+          const segOrientation = getWallOrientation(firstSegment);
+          let reconstructedStart: Point2D;
+          let reconstructedEnd: Point2D;
+
+          if (segOrientation === "horizontal") {
+            // For horizontal walls, use leftmost and rightmost points
+            const allX = [
+              firstSegment.start.x,
+              firstSegment.end.x,
+              lastSegment.start.x,
+              lastSegment.end.x
+            ];
+            const minX = Math.min(...allX);
+            const maxX = Math.max(...allX);
+            const y = firstSegment.start.y;
+
+            reconstructedStart = { x: minX, y };
+            reconstructedEnd = { x: maxX, y };
+          } else {
+            // For vertical walls, use topmost and bottommost points
+            const allY = [
+              firstSegment.start.y,
+              firstSegment.end.y,
+              lastSegment.start.y,
+              lastSegment.end.y
+            ];
+            const minY = Math.min(...allY);
+            const maxY = Math.max(...allY);
+            const x = firstSegment.start.x;
+
+            reconstructedStart = { x, y: minY };
+            reconstructedEnd = { x, y: maxY };
+          }
+
+          wallToMove = {
+            id: wall.parentWallId,
+            start: reconstructedStart,
+            end: reconstructedEnd,
+            thickness: wall.thickness,
+            height: wall.height,
+            isExterior: wall.isExterior
+          };
+
+          // Remove all segments from connectivity and wall lists
+          for (const segment of siblingSegments) {
+            const startKey = pointKey(segment.start.x, segment.start.y);
+            const endKey = pointKey(segment.end.x, segment.end.y);
+
+            if (floor.connectivity[startKey]) {
+              floor.connectivity[startKey] = floor.connectivity[startKey].filter(id => id !== segment.id);
+              if (floor.connectivity[startKey].length === 0) {
+                delete floor.connectivity[startKey];
+              }
+            }
+            if (floor.connectivity[endKey]) {
+              floor.connectivity[endKey] = floor.connectivity[endKey].filter(id => id !== segment.id);
+              if (floor.connectivity[endKey].length === 0) {
+                delete floor.connectivity[endKey];
+              }
+            }
+
+            delete floor.walls[segment.id];
+            floor.wallIds = floor.wallIds.filter(id => id !== segment.id);
+          }
+        }
+      } else {
+        // Remove original unsplit wall from connectivity
+        const oldStartKey = pointKey(wall.start.x, wall.start.y);
+        const oldEndKey = pointKey(wall.end.x, wall.end.y);
+        if (floor.connectivity[oldStartKey]) {
+          floor.connectivity[oldStartKey] = floor.connectivity[oldStartKey].filter(id => id !== wall.id);
+          if (floor.connectivity[oldStartKey].length === 0) {
+            delete floor.connectivity[oldStartKey];
+          }
+        }
+        if (floor.connectivity[oldEndKey]) {
+          floor.connectivity[oldEndKey] = floor.connectivity[oldEndKey].filter(id => id !== wall.id);
+          if (floor.connectivity[oldEndKey].length === 0) {
+            delete floor.connectivity[oldEndKey];
+          }
+        }
+
+        delete floor.walls[wall.id];
+        floor.wallIds = floor.wallIds.filter(id => id !== wall.id);
+      }
+
+      // Create L-shaped corner configuration from the reconstructed wall
+      const moveDistance = 1; // Standard grid unit movement
+      const cornerSegments = createCornerSegments(
+        floor,
+        wallToMove,
+        cornerCheck.attachedInteriorWall,
+        cornerCheck.attachmentPoint,
+        direction,
+        moveDistance
+      );
+
+      // Add corner segments
+      floor.walls[cornerSegments.leftSegment.id] = cornerSegments.leftSegment;
+      floor.walls[cornerSegments.middleSegment.id] = cornerSegments.middleSegment;
+      floor.walls[cornerSegments.rightSegment.id] = cornerSegments.rightSegment;
+      floor.wallIds.push(
+        cornerSegments.leftSegment.id,
+        cornerSegments.middleSegment.id,
+        cornerSegments.rightSegment.id
+      );
+
+      // Update connectivity for all new segments
+      const updateSegmentConnectivity = (segment: Wall) => {
+        const startKey = pointKey(segment.start.x, segment.start.y);
+        const endKey = pointKey(segment.end.x, segment.end.y);
+        if (!floor.connectivity[startKey]) floor.connectivity[startKey] = [];
+        if (!floor.connectivity[endKey]) floor.connectivity[endKey] = [];
+        if (!floor.connectivity[startKey].includes(segment.id)) {
+          floor.connectivity[startKey].push(segment.id);
+        }
+        if (!floor.connectivity[endKey].includes(segment.id)) {
+          floor.connectivity[endKey].push(segment.id);
+        }
+      };
+
+      updateSegmentConnectivity(cornerSegments.leftSegment);
+      updateSegmentConnectivity(cornerSegments.middleSegment);
+      updateSegmentConnectivity(cornerSegments.rightSegment);
+
+      // Update connected walls at the original wall endpoints (using reconstructed wall, not segment!)
+      const oldStart = { x: wallToMove.start.x, y: wallToMove.start.y };
+      const oldEnd = { x: wallToMove.end.x, y: wallToMove.end.y };
+
+      // Find walls connected at start (now connects to left segment's start)
+      const connectedAtStart = findWallsConnectedToPoint(floor, oldStart, wallToMove.id);
+      connectedAtStart.forEach((connectedWall) => {
+        updateWallEndpoint(floor, connectedWall, oldStart, cornerSegments.leftSegment.start);
+      });
+
+      // Find walls connected at end (now connects to right segment's end)
+      const connectedAtEnd = findWallsConnectedToPoint(floor, oldEnd, wallToMove.id);
+      connectedAtEnd.forEach((connectedWall) => {
+        updateWallEndpoint(floor, connectedWall, oldEnd, cornerSegments.rightSegment.end);
+      });
+
+      return;
+    }
+
+    // Standard wall movement (no corner creation needed)
     // Store old positions
     const oldStart = { x: wall.start.x, y: wall.start.y };
     const oldEnd = { x: wall.end.x, y: wall.end.y };
@@ -819,43 +1430,9 @@ export const actions = {
       updateWallEndpoint(floor, connectedWall, oldEnd, newEnd);
     });
 
-    // Update interior walls that are attached to this exterior wall
-    const halfExteriorThickness = WALL_THICKNESS / GRID_SIZE / 2; // 0.5 grid units
-
-    for (const interiorWallId of floor.interiorWallIds) {
-      const interiorWall = floor.interiorWalls[interiorWallId];
-      if (!interiorWall) continue;
-
-      const interiorOrientation = getWallOrientation(interiorWall);
-
-      // If this is a horizontal exterior wall and we have vertical interior walls
-      if (orientation === "horizontal" && interiorOrientation === "vertical") {
-        // Check if interior wall is attached to this horizontal wall
-        const isAttachedToStart = Math.abs(interiorWall.start.y - oldStart.y) < halfExteriorThickness + 0.01;
-        const isAttachedToEnd = Math.abs(interiorWall.end.y - oldStart.y) < halfExteriorThickness + 0.01;
-
-        // Update interior wall endpoints to maintain attachment
-        if (isAttachedToStart) {
-          interiorWall.start.y = newStart.y + halfExteriorThickness;
-        }
-        if (isAttachedToEnd) {
-          interiorWall.end.y = newStart.y - halfExteriorThickness;
-        }
-      }
-      // If this is a vertical exterior wall and we have horizontal interior walls
-      else if (orientation === "vertical" && interiorOrientation === "horizontal") {
-        // Check if interior wall is attached to this vertical wall
-        const isAttachedToStart = Math.abs(interiorWall.start.x - oldStart.x) < halfExteriorThickness + 0.01;
-        const isAttachedToEnd = Math.abs(interiorWall.end.x - oldStart.x) < halfExteriorThickness + 0.01;
-
-        // Update interior wall endpoints to maintain attachment
-        if (isAttachedToStart) {
-          interiorWall.start.x = newStart.x + halfExteriorThickness;
-        }
-        if (isAttachedToEnd) {
-          interiorWall.end.x = newStart.x - halfExteriorThickness;
-        }
-      }
-    }
+    // Note: Interior walls are NOT moved with exterior walls.
+    // They either:
+    // 1. Stay in place when exterior wall moves (corner creation happens)
+    // 2. Move only when their attachment segment (middle segment) moves
   },
 };
