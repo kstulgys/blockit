@@ -554,13 +554,30 @@ export const actions = {
           // then move the vertices within that range to the new position.
           
           const newVerts: Vertex[] = [];
+          const nextVertexIndex = (i + 1) % room.vertices.length;
           
           for (let j = 0; j < room.vertices.length; j++) {
             const curr = room.vertices[j];
             const next = room.vertices[(j + 1) % room.vertices.length];
             
             if (j !== i) {
-              // Not the edge we're modifying, just keep the vertex
+              // Not the edge we're modifying
+              // But also skip if this vertex is the END of the modified edge
+              // (it will be handled by the edge modification)
+              if (j === nextVertexIndex) {
+                // Check if this vertex is ON the wall line and within wall range
+                // If so, it's being replaced by the moved segment
+                const vertOnWallLine = isHorizontal
+                  ? Math.abs(curr.z - wallPosition) < 0.01
+                  : Math.abs(curr.x - wallPosition) < 0.01;
+                const vertCoord = isHorizontal ? curr.x : curr.z;
+                const vertInWallRange = vertCoord >= wallRangeStart - 0.01 && vertCoord <= wallRangeEnd + 0.01;
+                
+                if (vertOnWallLine && vertInWallRange) {
+                  // Skip this vertex - it's being replaced
+                  continue;
+                }
+              }
               newVerts.push({ ...curr });
             } else {
               // This is the edge we need to modify

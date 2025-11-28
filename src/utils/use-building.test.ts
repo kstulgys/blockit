@@ -199,12 +199,26 @@ function moveWallInRooms(
       } else {
         // CASE 2: Partial edge - need to insert/modify vertices
         const newVerts: Vertex[] = [];
+        const nextVertexIndex = (i + 1) % room.vertices.length;
 
         for (let j = 0; j < room.vertices.length; j++) {
           const curr = room.vertices[j];
           const next = room.vertices[(j + 1) % room.vertices.length];
 
           if (j !== i) {
+            // Not the edge we're modifying
+            // But also skip if this vertex is the END of the modified edge
+            if (j === nextVertexIndex) {
+              const vertOnWallLine = isHorizontal
+                ? Math.abs(curr.z - wallPosition) < 0.01
+                : Math.abs(curr.x - wallPosition) < 0.01;
+              const vertCoord = isHorizontal ? curr.x : curr.z;
+              const vertInWallRange = vertCoord >= wallRangeStart - 0.01 && vertCoord <= wallRangeEnd + 0.01;
+              
+              if (vertOnWallLine && vertInWallRange) {
+                continue; // Skip - being replaced
+              }
+            }
             newVerts.push({ ...curr });
           } else {
             const currCoord = isHorizontal ? curr.x : curr.z;
