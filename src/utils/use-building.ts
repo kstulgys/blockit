@@ -440,13 +440,39 @@ export const actions = {
       : Math.max(wall.start.z, wall.end.z);
     const newPosition = wallPosition + delta;
 
-    // For interior walls, check that ALL rooms have a full edge match
-    // If any room only partially contains the wall, block the move
+    // For interior walls, check that the SHRINKING room has a full edge match.
+    // The shrinking room is the one where the wall moves INTO it.
+    // If that room has a partial edge, moving would push the wall past an exterior corner.
+    //
+    // For vertical wall moving right (delta > 0): room on RIGHT shrinks
+    // For vertical wall moving left (delta < 0): room on LEFT shrinks
+    // For horizontal wall moving down (delta > 0): room BELOW shrinks
+    // For horizontal wall moving up (delta < 0): room ABOVE shrinks
     if (wall.type === "interior") {
       for (const roomId of wall.roomIds) {
         const room = state.rooms[roomId];
         if (!room) continue;
 
+        // Determine if this room is on the shrinking side
+        // Find the room's center relative to the wall
+        const roomCenter = isHorizontal
+          ? room.vertices.reduce((sum, v) => sum + v.z, 0) / room.vertices.length
+          : room.vertices.reduce((sum, v) => sum + v.x, 0) / room.vertices.length;
+        
+        const roomIsOnPositiveSide = roomCenter > wallPosition;
+        const movingPositive = delta > 0;
+        
+        // Room shrinks when: moving positive AND room is on positive side
+        //                 OR moving negative AND room is on negative side
+        const roomShrinks = (movingPositive && roomIsOnPositiveSide) || 
+                           (!movingPositive && !roomIsOnPositiveSide);
+        
+        if (!roomShrinks) {
+          // This room expands - no constraint needed
+          continue;
+        }
+
+        // Check if the shrinking room has a full edge match
         let hasFullEdgeMatch = false;
         
         for (let i = 0; i < room.vertices.length; i++) {
@@ -470,7 +496,7 @@ export const actions = {
         }
         
         if (!hasFullEdgeMatch) {
-          // This room doesn't have a full edge match - block the move
+          // Shrinking room doesn't have a full edge match - block the move
           return null;
         }
       }

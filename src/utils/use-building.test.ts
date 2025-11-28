@@ -91,12 +91,30 @@ function moveWallInRooms(
     : Math.max(wall.start.z, wall.end.z);
   const newPosition = wallPosition + delta;
 
-  // For interior walls, check that ALL rooms have a full edge match
-  // If any room only partially contains the wall, block the move
+  // For interior walls, check that the SHRINKING room has a full edge match.
+  // The shrinking room is the one where the wall moves INTO it.
   if (wall.type === "interior") {
     for (const roomId of wall.roomIds) {
       const room = rooms[roomId];
       if (!room) continue;
+
+      // Determine if this room is on the shrinking side
+      const roomCenter = isHorizontal
+        ? room.vertices.reduce((sum, v) => sum + v.z, 0) / room.vertices.length
+        : room.vertices.reduce((sum, v) => sum + v.x, 0) / room.vertices.length;
+      
+      const roomIsOnPositiveSide = roomCenter > wallPosition;
+      const movingPositive = delta > 0;
+      
+      // Room shrinks when: moving positive AND room is on positive side
+      //                 OR moving negative AND room is on negative side
+      const roomShrinks = (movingPositive && roomIsOnPositiveSide) || 
+                         (!movingPositive && !roomIsOnPositiveSide);
+      
+      if (!roomShrinks) {
+        // This room expands - no constraint needed
+        continue;
+      }
 
       let hasFullEdgeMatch = false;
       
@@ -121,7 +139,7 @@ function moveWallInRooms(
       }
       
       if (!hasFullEdgeMatch) {
-        // This room doesn't have a full edge match - block the move
+        // Shrinking room doesn't have a full edge match - block the move
         return null;
       }
     }
@@ -359,7 +377,7 @@ describe("moveWall", () => {
     console.log("Move blocked as expected - interior wall sits at exterior corner");
   });
   
-  it("should ALLOW interior wall move to left (shrinks room1)", () => {
+  it("should ALLOW interior wall move to left (shrinks room1, expands room2)", () => {
     const rooms = createTestRooms();
     const walls = deriveWalls(rooms);
     
@@ -375,16 +393,36 @@ describe("moveWall", () => {
     console.log(`Wall ID: ${interiorWall!.id}`);
     console.log(`Wall range: z=${interiorWall!.start.z} to z=${interiorWall!.end.z}`);
     
-    // Move it left - this should work because:
-    // - Room 1 has full edge match at x=4.5 (z: 0-6)
-    // - Room 2 also has a full edge match for the z: 0-6 segment
-    // Wait, actually room2's left edge goes from z=0 to z=9, so it's still partial
-    // The constraint should block this too
+    // Move it left - this SHOULD work because:
+    // - Room 1 SHRINKS and has full edge match at x=4.5 (z: 0-6) - OK
+    // - Room 2 EXPANDS (wall moves away from room2) - no constraint needed
+    // Only the shrinking room needs full edge match!
     const newRooms = moveWallInRooms(rooms, interiorWall!.id, "left");
     
-    // This should also be blocked because room2 doesn't have a full edge match
-    expect(newRooms).toBeNull();
-    console.log("Move blocked - room2 has partial edge match");
+    // This should succeed
+    expect(newRooms).not.toBeNull();
+    
+    if (newRooms) {
+      console.log("\n--- Room 1 vertices after move ---");
+      for (const v of newRooms.room1.vertices) {
+        console.log(`  (${v.x}, ${v.z})`);
+      }
+      
+      console.log("\n--- Room 2 vertices after move ---");
+      for (const v of newRooms.room2.vertices) {
+        console.log(`  (${v.x}, ${v.z})`);
+      }
+      
+      // Room 1's right edge should now be at x=4.4 (moved left by 0.1)
+      const room1RightX = Math.max(...newRooms.room1.vertices.map(v => v.x));
+      console.log(`Room 1 right edge: ${room1RightX}`);
+      expect(Math.abs(room1RightX - 4.4)).toBeLessThan(0.01);
+      
+      // Room 2 should have a step: partially at 4.4 (z: 0-6) and 4.5 (z: 6-9)
+      const room2MinX = Math.min(...newRooms.room2.vertices.map(v => v.x));
+      console.log(`Room 2 min X: ${room2MinX}`);
+      expect(Math.abs(room2MinX - 4.4)).toBeLessThan(0.01);
+    }
   });
   
   it("should move interior wall when both rooms have full edge match", () => {
