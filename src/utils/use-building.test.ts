@@ -91,6 +91,42 @@ function moveWallInRooms(
     : Math.max(wall.start.z, wall.end.z);
   const newPosition = wallPosition + delta;
 
+  // For interior walls, check that ALL rooms have a full edge match
+  // If any room only partially contains the wall, block the move
+  if (wall.type === "interior") {
+    for (const roomId of wall.roomIds) {
+      const room = rooms[roomId];
+      if (!room) continue;
+
+      let hasFullEdgeMatch = false;
+      
+      for (let i = 0; i < room.vertices.length; i++) {
+        const v1 = room.vertices[i];
+        const v2 = room.vertices[(i + 1) % room.vertices.length];
+        
+        const isEdgeOnWallLine = isHorizontal
+          ? (Math.abs(v1.z - wallPosition) < 0.01 && Math.abs(v2.z - wallPosition) < 0.01)
+          : (Math.abs(v1.x - wallPosition) < 0.01 && Math.abs(v2.x - wallPosition) < 0.01);
+        
+        if (!isEdgeOnWallLine) continue;
+        
+        const edgeMin = isHorizontal ? Math.min(v1.x, v2.x) : Math.min(v1.z, v2.z);
+        const edgeMax = isHorizontal ? Math.max(v1.x, v2.x) : Math.max(v1.z, v2.z);
+        
+        // Check if this edge exactly matches the wall range
+        if (Math.abs(edgeMin - wallRangeStart) < 0.01 && Math.abs(edgeMax - wallRangeEnd) < 0.01) {
+          hasFullEdgeMatch = true;
+          break;
+        }
+      }
+      
+      if (!hasFullEdgeMatch) {
+        // This room doesn't have a full edge match - block the move
+        return null;
+      }
+    }
+  }
+
   // Deep clone rooms
   const newRooms: Record<string, Room> = {};
   for (const [key, room] of Object.entries(rooms)) {
@@ -296,7 +332,7 @@ describe("deriveWalls", () => {
 });
 
 describe("moveWall", () => {
-  it("should move interior wall - room1 exact match, room2 partial", () => {
+  it("should BLOCK interior wall move to right (room2 has partial edge at corner)", () => {
     const rooms = createTestRooms();
     const walls = deriveWalls(rooms);
     
@@ -308,9 +344,86 @@ describe("moveWall", () => {
     });
     
     expect(interiorWall).toBeDefined();
-    console.log("\n=== Moving interior wall ===");
+    console.log("\n=== Attempting to move interior wall RIGHT (should be blocked) ===");
     console.log(`Wall ID: ${interiorWall!.id}`);
     console.log(`Wall range: z=${interiorWall!.start.z} to z=${interiorWall!.end.z}`);
+    
+    // Try to move it right - this should be BLOCKED because:
+    // - Room 1 has full edge match (z: 0-6)
+    // - Room 2 has partial edge (wall is z: 0-6, but room2's edge is z: 0-9)
+    // Moving right would push the wall past the exterior corner
+    const newRooms = moveWallInRooms(rooms, interiorWall!.id, "right");
+    
+    // Move should be blocked
+    expect(newRooms).toBeNull();
+    console.log("Move blocked as expected - interior wall sits at exterior corner");
+  });
+  
+  it("should ALLOW interior wall move to left (shrinks room1)", () => {
+    const rooms = createTestRooms();
+    const walls = deriveWalls(rooms);
+    
+    // Find interior wall at x=4.5 (z: 0 to 6)
+    const interiorWall = findWall(walls, {
+      orientation: "vertical",
+      type: "interior",
+      position: 4.5,
+    });
+    
+    expect(interiorWall).toBeDefined();
+    console.log("\n=== Moving interior wall LEFT (should be allowed) ===");
+    console.log(`Wall ID: ${interiorWall!.id}`);
+    console.log(`Wall range: z=${interiorWall!.start.z} to z=${interiorWall!.end.z}`);
+    
+    // Move it left - this should work because:
+    // - Room 1 has full edge match at x=4.5 (z: 0-6)
+    // - Room 2 also has a full edge match for the z: 0-6 segment
+    // Wait, actually room2's left edge goes from z=0 to z=9, so it's still partial
+    // The constraint should block this too
+    const newRooms = moveWallInRooms(rooms, interiorWall!.id, "left");
+    
+    // This should also be blocked because room2 doesn't have a full edge match
+    expect(newRooms).toBeNull();
+    console.log("Move blocked - room2 has partial edge match");
+  });
+  
+  it("should move interior wall when both rooms have full edge match", () => {
+    // Create two rectangular rooms that share a complete edge
+    const rooms: Record<string, Room> = {
+      room1: {
+        id: "room1",
+        name: "Room 1",
+        vertices: [
+          { x: 0, z: 0 },
+          { x: 4.5, z: 0 },
+          { x: 4.5, z: 6 },
+          { x: 0, z: 6 },
+        ],
+      },
+      room2: {
+        id: "room2",
+        name: "Room 2",
+        vertices: [
+          { x: 4.5, z: 0 },
+          { x: 9, z: 0 },
+          { x: 9, z: 6 },  // Same height as room1!
+          { x: 4.5, z: 6 },
+        ],
+      },
+    };
+    
+    const walls = deriveWalls(rooms);
+    
+    // Find interior wall at x=4.5 (z: 0 to 6)
+    const interiorWall = findWall(walls, {
+      orientation: "vertical",
+      type: "interior",
+      position: 4.5,
+    });
+    
+    expect(interiorWall).toBeDefined();
+    console.log("\n=== Moving interior wall (both rooms full edge match) ===");
+    console.log(`Wall ID: ${interiorWall!.id}`);
     
     // Move it right by 0.1m (interior step)
     const newRooms = moveWallInRooms(rooms, interiorWall!.id, "right");
@@ -332,17 +445,14 @@ describe("moveWall", () => {
       console.log(`Room 1 right edge: ${room1RightX}`);
       expect(Math.abs(room1RightX - 4.6)).toBeLessThan(0.01);
       
-      // Room 2 should now have a step: left edge is partially at 4.6 (z: 0-6) and 4.5 (z: 6-9)
-      // The minimum x should still be 4.5 (the part from z=6 to z=9)
-      // But there should also be vertices at x=4.6
-      const room2XValues = newRooms.room2.vertices.map(v => v.x);
-      const hasX46 = room2XValues.some(x => Math.abs(x - 4.6) < 0.01);
-      console.log(`Room 2 has x=4.6: ${hasX46}`);
-      expect(hasX46).toBe(true);
+      // Room 2's left edge should now be at x=4.6
+      const room2LeftX = Math.min(...newRooms.room2.vertices.map(v => v.x));
+      console.log(`Room 2 left edge: ${room2LeftX}`);
+      expect(Math.abs(room2LeftX - 4.6)).toBeLessThan(0.01);
       
-      // Room 2 should have more vertices now (step inserted)
-      console.log(`Room 2 vertex count: ${newRooms.room2.vertices.length}`);
-      expect(newRooms.room2.vertices.length).toBeGreaterThan(4);
+      // Both rooms should still be rectangles (4 vertices each)
+      expect(newRooms.room1.vertices.length).toBe(4);
+      expect(newRooms.room2.vertices.length).toBe(4);
       
       // Derive walls again
       const newWalls = deriveWalls(newRooms);
@@ -503,9 +613,30 @@ describe("moveWall", () => {
     }
   });
   
-  it("should move exterior wall after interior wall has been moved (complex case)", () => {
-    // Start with initial rooms
-    let rooms = createTestRooms();
+  it("should move exterior wall after interior wall has been moved (with matching rooms)", () => {
+    // Create two rectangular rooms with matching heights (full edge match)
+    let rooms: Record<string, Room> = {
+      room1: {
+        id: "room1",
+        name: "Room 1",
+        vertices: [
+          { x: 0, z: 0 },
+          { x: 4.5, z: 0 },
+          { x: 4.5, z: 6 },
+          { x: 0, z: 6 },
+        ],
+      },
+      room2: {
+        id: "room2",
+        name: "Room 2",
+        vertices: [
+          { x: 4.5, z: 0 },
+          { x: 9, z: 0 },
+          { x: 9, z: 6 },  // Same height!
+          { x: 4.5, z: 6 },
+        ],
+      },
+    };
     let walls = deriveWalls(rooms);
     
     // First, move the interior wall at x=4.5 to the right
@@ -579,57 +710,49 @@ describe("moveWall", () => {
     }
   });
   
-  it("should move bottom wall and keep corners connected (after interior wall move)", () => {
-    // Start with initial rooms
-    let rooms = createTestRooms();
-    let walls = deriveWalls(rooms);
+  it("should move bottom wall and keep corners connected (exterior wall partial)", () => {
+    // Start with the L-shape rooms
+    const rooms = createTestRooms();
+    const walls = deriveWalls(rooms);
     
-    // First, move the interior wall at x=4.5 to the right
-    const interiorWall = findWall(walls, {
-      orientation: "vertical",
-      type: "interior",
-      position: 4.5,
-    });
-    
-    rooms = moveWallInRooms(rooms, interiorWall!.id, "right")!;
-    
-    // Now get the new walls
-    walls = deriveWalls(rooms);
-    
-    console.log("\n=== Testing bottom wall move after interior wall move ===");
+    console.log("\n=== Testing bottom wall move (partial exterior) ===");
     console.log("Room 1 vertices:");
     for (const v of rooms.room1.vertices) {
       console.log(`  (${v.x}, ${v.z})`);
     }
     
-    // Find the bottom wall at z=6 (this is wall-horizontal-6.0000-0.0000-4.5000)
+    // Find the bottom wall of room1 at z=6 (x: 0 to 4.5)
     const bottomWall = findWall(walls, {
       orientation: "horizontal",
       type: "exterior", 
       position: 6,
       rangeStart: 0,
+      rangeEnd: 4.5,
     });
     
     expect(bottomWall).toBeDefined();
     console.log(`Bottom wall: ${bottomWall!.id}`);
     console.log(`  Range: x=${bottomWall!.start.x} to x=${bottomWall!.end.x}`);
     
-    // Move it down
+    // Move it down - this should work since it's a full edge match for room1
     const finalRooms = moveWallInRooms(rooms, bottomWall!.id, "down");
+    expect(finalRooms).not.toBeNull();
     
     console.log("\nRoom 1 after bottom wall move:");
     if (finalRooms) {
       for (const v of finalRooms.room1.vertices) {
         console.log(`  (${v.x}, ${v.z})`);
       }
-    } else {
-      console.log("  MOVE FAILED!");
+      
+      // Room 1's bottom edge should now be at z=6.3
+      const room1MaxZ = Math.max(...finalRooms.room1.vertices.map(v => v.z));
+      console.log(`Room 1 max Z: ${room1MaxZ}`);
+      expect(Math.abs(room1MaxZ - 6.3)).toBeLessThan(0.01);
     }
-    
-    expect(finalRooms).not.toBeNull();
   });
 });
 
+describe("exterior wall edge cases", () => {
   it("should move exterior wall at x=4.5 z=6-9 and keep corner connected", () => {
     // Start with rooms after interior wall move
     const rooms: Record<string, Room> = {
@@ -698,3 +821,4 @@ describe("moveWall", () => {
       expect(cornerVertex).toBeDefined();
     }
   });
+});

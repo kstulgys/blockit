@@ -399,9 +399,12 @@ export const actions = {
    * 1. Full edge move: Room's edge exactly matches the wall segment
    *    -> Simply move the boundary vertices
    * 2. Partial edge move: Wall is a subsegment of room's edge
-   *    -> Insert step vertices to create a notch
+   *    -> Insert step vertices to create a notch (ONLY for exterior walls)
    * 3. No match: Room doesn't have this wall as an edge
    *    -> Skip (shouldn't happen if wall.roomIds is correct)
+   * 
+   * IMPORTANT: Interior walls can ONLY move if ALL rooms have a full edge match.
+   * This prevents interior walls from moving past exterior wall corners.
    */
   moveWall(wallId: string, direction: "up" | "down" | "left" | "right"): string | null {
     const walls = deriveWalls(state.rooms);
@@ -436,6 +439,42 @@ export const actions = {
       ? Math.max(wall.start.x, wall.end.x) 
       : Math.max(wall.start.z, wall.end.z);
     const newPosition = wallPosition + delta;
+
+    // For interior walls, check that ALL rooms have a full edge match
+    // If any room only partially contains the wall, block the move
+    if (wall.type === "interior") {
+      for (const roomId of wall.roomIds) {
+        const room = state.rooms[roomId];
+        if (!room) continue;
+
+        let hasFullEdgeMatch = false;
+        
+        for (let i = 0; i < room.vertices.length; i++) {
+          const v1 = room.vertices[i];
+          const v2 = room.vertices[(i + 1) % room.vertices.length];
+          
+          const isEdgeOnWallLine = isHorizontal
+            ? (Math.abs(v1.z - wallPosition) < 0.01 && Math.abs(v2.z - wallPosition) < 0.01)
+            : (Math.abs(v1.x - wallPosition) < 0.01 && Math.abs(v2.x - wallPosition) < 0.01);
+          
+          if (!isEdgeOnWallLine) continue;
+          
+          const edgeMin = isHorizontal ? Math.min(v1.x, v2.x) : Math.min(v1.z, v2.z);
+          const edgeMax = isHorizontal ? Math.max(v1.x, v2.x) : Math.max(v1.z, v2.z);
+          
+          // Check if this edge exactly matches the wall range
+          if (Math.abs(edgeMin - wallRangeStart) < 0.01 && Math.abs(edgeMax - wallRangeEnd) < 0.01) {
+            hasFullEdgeMatch = true;
+            break;
+          }
+        }
+        
+        if (!hasFullEdgeMatch) {
+          // This room doesn't have a full edge match - block the move
+          return null;
+        }
+      }
+    }
 
     let moved = false;
 
