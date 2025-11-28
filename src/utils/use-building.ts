@@ -440,21 +440,27 @@ export const actions = {
       : Math.max(wall.start.z, wall.end.z);
     const newPosition = wallPosition + delta;
 
-    // For interior walls, check that the SHRINKING room has a full edge match.
-    // The shrinking room is the one where the wall moves INTO it.
-    // If that room has a partial edge, moving would push the wall past an exterior corner.
+    // For interior walls, check that the move doesn't push past exterior corners.
     //
-    // For vertical wall moving right (delta > 0): room on RIGHT shrinks
-    // For vertical wall moving left (delta < 0): room on LEFT shrinks
-    // For horizontal wall moving down (delta > 0): room BELOW shrinks
-    // For horizontal wall moving up (delta < 0): room ABOVE shrinks
+    // Two checks are needed:
+    // 1. The shrinking room must have a FULL EDGE MATCH at the current wall position
+    // 2. The shrinking room must NOT have any obstructions at the new position
+    //
+    // Example 1: wall at x=4.5 from z=0→6
+    // - Room1 has edge at x=4.5 from z=0→6 (full match) - can shrink left
+    // - Room2 has edge at x=4.5 from z=0→9 (partial, wall only covers z=0→6)
+    //   At z=6 there's an exterior corner - Room2 can't shrink right
+    //
+    // Example 2: after moving wall left to x=4.4, Room2 has a step at x=4.5, z=6
+    // - Room2 now has edge at x=4.4 from z=0→6 (full match for wall)
+    // - BUT Room2 has a vertex at (4.5, 6) which is at the new position
+    // - Moving right to x=4.5 would conflict with this vertex - blocked
     if (wall.type === "interior") {
       for (const roomId of wall.roomIds) {
         const room = state.rooms[roomId];
         if (!room) continue;
 
         // Determine if this room is on the shrinking side
-        // Find the room's center relative to the wall
         const roomCenter = isHorizontal
           ? room.vertices.reduce((sum, v) => sum + v.z, 0) / room.vertices.length
           : room.vertices.reduce((sum, v) => sum + v.x, 0) / room.vertices.length;
@@ -462,17 +468,14 @@ export const actions = {
         const roomIsOnPositiveSide = roomCenter > wallPosition;
         const movingPositive = delta > 0;
         
-        // Room shrinks when: moving positive AND room is on positive side
-        //                 OR moving negative AND room is on negative side
         const roomShrinks = (movingPositive && roomIsOnPositiveSide) || 
                            (!movingPositive && !roomIsOnPositiveSide);
         
         if (!roomShrinks) {
-          // This room expands - no constraint needed
-          continue;
+          continue; // This room expands - no constraint needed
         }
 
-        // Check if the shrinking room has a full edge match
+        // Check 1: The shrinking room must have a full edge match at current position
         let hasFullEdgeMatch = false;
         
         for (let i = 0; i < room.vertices.length; i++) {
@@ -496,8 +499,43 @@ export const actions = {
         }
         
         if (!hasFullEdgeMatch) {
-          // Shrinking room doesn't have a full edge match - block the move
           return null;
+        }
+
+        // Check 2: The shrinking room must not have obstructions at the new position
+        // Look for any vertices at newPosition within the wall range
+        // EXCLUDING vertices that are currently on the wall (they will move with it)
+        for (const v of room.vertices) {
+          const vPosition = isHorizontal ? v.z : v.x;
+          const vCoord = isHorizontal ? v.x : v.z;
+          
+          // Skip vertices that are on the current wall line (they'll be moved)
+          if (Math.abs(vPosition - wallPosition) < 0.01) {
+            continue;
+          }
+          
+          // Check if this vertex is at the new wall position
+          if (Math.abs(vPosition - newPosition) < 0.01) {
+            // Check if it's within the wall range (not just at boundaries)
+            if (vCoord > wallRangeStart + 0.01 && vCoord < wallRangeEnd - 0.01) {
+              // Vertex is strictly inside the wall range at new position - obstruction
+              return null;
+            }
+            // Also check if it's at a boundary but indicates an exterior corner
+            // A vertex at (newPosition, wallRangeEnd) is an obstruction if the room
+            // extends beyond wallRangeEnd at that position
+            if (Math.abs(vCoord - wallRangeEnd) < 0.01 || Math.abs(vCoord - wallRangeStart) < 0.01) {
+              // Check if room has more extent at this endpoint
+              for (const v2 of room.vertices) {
+                const v2Position = isHorizontal ? v2.z : v2.x;
+                const v2Coord = isHorizontal ? v2.x : v2.z;
+                if (Math.abs(v2Position - newPosition) < 0.01 && Math.abs(v2Coord - vCoord) > 0.01) {
+                  // Room has another vertex at newPosition beyond this point - exterior corner
+                  return null;
+                }
+              }
+            }
+          }
         }
       }
     }

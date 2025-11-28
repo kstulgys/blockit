@@ -91,14 +91,13 @@ function moveWallInRooms(
     : Math.max(wall.start.z, wall.end.z);
   const newPosition = wallPosition + delta;
 
-  // For interior walls, check that the SHRINKING room has a full edge match.
-  // The shrinking room is the one where the wall moves INTO it.
+  // For interior walls, check that the move doesn't push past exterior corners.
+  // Two checks: full edge match at current position, and no obstructions at new position.
   if (wall.type === "interior") {
     for (const roomId of wall.roomIds) {
       const room = rooms[roomId];
       if (!room) continue;
 
-      // Determine if this room is on the shrinking side
       const roomCenter = isHorizontal
         ? room.vertices.reduce((sum, v) => sum + v.z, 0) / room.vertices.length
         : room.vertices.reduce((sum, v) => sum + v.x, 0) / room.vertices.length;
@@ -106,16 +105,12 @@ function moveWallInRooms(
       const roomIsOnPositiveSide = roomCenter > wallPosition;
       const movingPositive = delta > 0;
       
-      // Room shrinks when: moving positive AND room is on positive side
-      //                 OR moving negative AND room is on negative side
       const roomShrinks = (movingPositive && roomIsOnPositiveSide) || 
                          (!movingPositive && !roomIsOnPositiveSide);
       
-      if (!roomShrinks) {
-        // This room expands - no constraint needed
-        continue;
-      }
+      if (!roomShrinks) continue;
 
+      // Check 1: Full edge match at current position
       let hasFullEdgeMatch = false;
       
       for (let i = 0; i < room.vertices.length; i++) {
@@ -131,7 +126,6 @@ function moveWallInRooms(
         const edgeMin = isHorizontal ? Math.min(v1.x, v2.x) : Math.min(v1.z, v2.z);
         const edgeMax = isHorizontal ? Math.max(v1.x, v2.x) : Math.max(v1.z, v2.z);
         
-        // Check if this edge exactly matches the wall range
         if (Math.abs(edgeMin - wallRangeStart) < 0.01 && Math.abs(edgeMax - wallRangeEnd) < 0.01) {
           hasFullEdgeMatch = true;
           break;
@@ -139,8 +133,36 @@ function moveWallInRooms(
       }
       
       if (!hasFullEdgeMatch) {
-        // Shrinking room doesn't have a full edge match - block the move
         return null;
+      }
+
+      // Check 2: No obstructions at new position
+      // Exclude vertices currently on the wall (they'll move with it)
+      for (const v of room.vertices) {
+        const vPosition = isHorizontal ? v.z : v.x;
+        const vCoord = isHorizontal ? v.x : v.z;
+        
+        // Skip vertices on current wall line
+        if (Math.abs(vPosition - wallPosition) < 0.01) {
+          continue;
+        }
+        
+        if (Math.abs(vPosition - newPosition) < 0.01) {
+          // Strictly inside wall range
+          if (vCoord > wallRangeStart + 0.01 && vCoord < wallRangeEnd - 0.01) {
+            return null;
+          }
+          // At boundary - check for exterior corner
+          if (Math.abs(vCoord - wallRangeEnd) < 0.01 || Math.abs(vCoord - wallRangeStart) < 0.01) {
+            for (const v2 of room.vertices) {
+              const v2Position = isHorizontal ? v2.z : v2.x;
+              const v2Coord = isHorizontal ? v2.x : v2.z;
+              if (Math.abs(v2Position - newPosition) < 0.01 && Math.abs(v2Coord - vCoord) > 0.01) {
+                return null; // Exterior corner
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -436,6 +458,24 @@ describe("moveWall", () => {
       const room2MinX = Math.min(...newRooms.room2.vertices.map(v => v.x));
       console.log(`Room 2 min X: ${room2MinX}`);
       expect(Math.abs(room2MinX - 4.4)).toBeLessThan(0.01);
+      
+      // NOW try to move the interior wall BACK to the right
+      // This should be BLOCKED because room2 now has a step at x=4.5, z=6
+      // and the wall can't move past that corner
+      const wallsAfterLeftMove = deriveWalls(newRooms);
+      const interiorWallAfterMove = findWall(wallsAfterLeftMove, {
+        orientation: "vertical",
+        type: "interior",
+        position: 4.4,
+      });
+      
+      expect(interiorWallAfterMove).toBeDefined();
+      console.log("\n=== Trying to move interior wall RIGHT after left move (should be blocked) ===");
+      console.log(`Wall ID: ${interiorWallAfterMove!.id}`);
+      
+      const roomsAfterRightMove = moveWallInRooms(newRooms, interiorWallAfterMove!.id, "right");
+      console.log(`Move right result: ${roomsAfterRightMove ? "ALLOWED (BUG!)" : "BLOCKED (correct)"}`);
+      expect(roomsAfterRightMove).toBeNull(); // Should be blocked!
     }
   });
   
