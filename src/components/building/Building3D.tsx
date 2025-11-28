@@ -1,25 +1,19 @@
 "use client";
 
 import { useEffect, useMemo } from "react";
-import { useBuilding, actions, deriveWalls, getWallAsLegacyFormat } from "~/utils/use-building";
+import { useBuilding, actions, deriveWallsFromGraph, getWallAsLegacyFormat } from "~/utils/use-building";
 import { Wall3D } from "./Wall3D";
 
 export function Building3D() {
   const building = useBuilding();
 
-  // Derive walls from rooms (memoized for performance)
+  // Derive walls from graph structure (memoized for performance)
   const walls = useMemo(() => {
-    // Convert readonly snapshot to mutable for deriveWalls
-    const mutableRooms: Record<string, { id: string; name: string; vertices: { x: number; z: number }[] }> = {};
-    for (const [key, room] of Object.entries(building.rooms)) {
-      mutableRooms[key] = {
-        id: room.id,
-        name: room.name,
-        vertices: room.vertices.map(v => ({ x: v.x, z: v.z })),
-      };
-    }
-    return deriveWalls(mutableRooms);
-  }, [building.rooms]);
+    // Trigger re-computation when junctions or walls change
+    const _ = building.junctions;
+    const __ = building.walls;
+    return deriveWallsFromGraph();
+  }, [building.junctions, building.walls]);
 
   // Keyboard event handler for wall movement
   useEffect(() => {

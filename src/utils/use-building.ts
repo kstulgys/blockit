@@ -12,29 +12,68 @@ export const INTERIOR_MOVE_STEP = 0.1; // 100mm
 export const MIN_ROOM_SIZE = 0.6; // 600mm minimum room dimension
 
 // =============================================================================
-// TYPES
+// TYPES - Graph-based data structure
 // =============================================================================
 
 /**
- * A vertex in 2D space (floor plan)
+ * A junction is a point where walls meet
  */
-export type Vertex = {
+export type Junction = {
+  id: string;
   x: number;
   z: number;
 };
 
 /**
- * A room defined as a closed polygon (vertices in clockwise order)
- * All edges must be axis-aligned (horizontal or vertical)
+ * A wall segment connecting two junctions
+ * - For interior walls: both leftRoomId and rightRoomId are set
+ * - For exterior walls: one side is null (the outside)
+ */
+export type Wall = {
+  id: string;
+  startJunctionId: string;
+  endJunctionId: string;
+  leftRoomId: string | null;  // Room on the left side (when facing from start to end)
+  rightRoomId: string | null; // Room on the right side
+};
+
+/**
+ * A room is defined by an ordered list of walls forming its boundary
  */
 export type Room = {
   id: string;
   name: string;
-  vertices: Vertex[]; // Clockwise order, axis-aligned edges only
+  wallIds: string[]; // Ordered clockwise
 };
 
 /**
- * A derived wall segment (computed from room edges)
+ * The complete building state using graph structure
+ */
+export type BuildingState = {
+  junctions: Record<string, Junction>;
+  walls: Record<string, Wall>;
+  rooms: Record<string, Room>;
+  selectedWallId: string | null;
+  hoveredWallId: string | null;
+};
+
+// =============================================================================
+// LEGACY TYPES - For backward compatibility
+// =============================================================================
+
+export type Vertex = {
+  x: number;
+  z: number;
+};
+
+export type LegacyRoom = {
+  id: string;
+  name: string;
+  vertices: Vertex[];
+};
+
+/**
+ * Derived wall format for rendering (backward compatible)
  */
 export type DerivedWall = {
   id: string;
@@ -45,68 +84,84 @@ export type DerivedWall = {
   roomIds: string[];
 };
 
-export type BuildingState = {
-  rooms: Record<string, Room>;
-  selectedWallId: string | null;
-  hoveredWallId: string | null;
-};
-
 // =============================================================================
 // INITIAL L-SHAPE BUILDING DATA
 // =============================================================================
 
 /*
-  L-shaped building with 2 rooms using polygon vertices:
+  L-shaped building with 2 rooms using graph structure:
   
-  Room 1 (left, rectangular): 
-    (0,0) -> (4.5,0) -> (4.5,6) -> (0,6) -> back to start
+  Junction layout:
+       0    4.5    9
+    0  j1----j2----j3
+       |     |     |
+       | R1  |     |
+       |     | R2  |
+    6  j4----j5    |
+             |     |
+    9        j6----j7
   
-  Room 2 (right, L-shaped):
-    (4.5,0) -> (9,0) -> (9,9) -> (4.5,9) -> (4.5,6) -> (4.5,0)
-    Wait, that's not right. Let me think...
-    
-    Actually Room 2 is rectangular: (4.5,0) -> (9,0) -> (9,9) -> (4.5,9)
-    
-  Layout:
-     0    4.5    9
-   0 +-----+-----+
-     |     |     |
-     |  1  |     |
-     |     |  2  |
-   6 +-----+     |
-           |     |
-   9       +-----+
+  Walls:
+  - w1: j1→j2 (top of R1, exterior)
+  - w2: j2→j3 (top of R2, exterior)  
+  - w3: j2→j5 (shared wall, interior)
+  - w4: j1→j4 (left of R1, exterior)
+  - w5: j4→j5 (bottom of R1, exterior)
+  - w6: j3→j7 (right of R2, exterior)
+  - w7: j5→j6 (left of R2 lower section, exterior)
+  - w8: j6→j7 (bottom of R2, exterior)
 */
 
-const createInitialRooms = (): Record<string, Room> => ({
-  room1: {
-    id: "room1",
-    name: "Room 1",
-    vertices: [
-      { x: 0, z: 0 },
-      { x: 4.5, z: 0 },
-      { x: 4.5, z: 6 },
-      { x: 0, z: 6 },
-    ],
-  },
-  room2: {
-    id: "room2",
-    name: "Room 2",
-    vertices: [
-      { x: 4.5, z: 0 },
-      { x: 9, z: 0 },
-      { x: 9, z: 9 },
-      { x: 4.5, z: 9 },
-    ],
-  },
-});
+function createInitialBuilding(): { 
+  junctions: Record<string, Junction>; 
+  walls: Record<string, Wall>; 
+  rooms: Record<string, Room>;
+} {
+  const junctions: Record<string, Junction> = {
+    j1: { id: "j1", x: 0, z: 0 },
+    j2: { id: "j2", x: 4.5, z: 0 },
+    j3: { id: "j3", x: 9, z: 0 },
+    j4: { id: "j4", x: 0, z: 6 },
+    j5: { id: "j5", x: 4.5, z: 6 },
+    j6: { id: "j6", x: 4.5, z: 9 },
+    j7: { id: "j7", x: 9, z: 9 },
+  };
+
+  // Walls are defined with consistent direction for room assignment
+  // Left/Right is determined when looking from start to end junction
+  const walls: Record<string, Wall> = {
+    // Room 1 boundary (clockwise: top, right-interior, bottom, left)
+    w1: { id: "w1", startJunctionId: "j1", endJunctionId: "j2", leftRoomId: null, rightRoomId: "room1" },
+    w3: { id: "w3", startJunctionId: "j2", endJunctionId: "j5", leftRoomId: "room1", rightRoomId: "room2" },
+    w5: { id: "w5", startJunctionId: "j5", endJunctionId: "j4", leftRoomId: null, rightRoomId: "room1" },
+    w4: { id: "w4", startJunctionId: "j4", endJunctionId: "j1", leftRoomId: null, rightRoomId: "room1" },
+    
+    // Room 2 boundary (clockwise from top-left shared point)
+    w2: { id: "w2", startJunctionId: "j2", endJunctionId: "j3", leftRoomId: null, rightRoomId: "room2" },
+    w6: { id: "w6", startJunctionId: "j3", endJunctionId: "j7", leftRoomId: "room2", rightRoomId: null },
+    w8: { id: "w8", startJunctionId: "j7", endJunctionId: "j6", leftRoomId: "room2", rightRoomId: null },
+    w7: { id: "w7", startJunctionId: "j6", endJunctionId: "j5", leftRoomId: "room2", rightRoomId: null },
+    // w3 is shared (interior wall) - already defined above
+  };
+
+  const rooms: Record<string, Room> = {
+    room1: { id: "room1", name: "Room 1", wallIds: ["w1", "w3", "w5", "w4"] },
+    room2: { id: "room2", name: "Room 2", wallIds: ["w2", "w6", "w8", "w7", "w3"] },
+  };
+
+  return { junctions, walls, rooms };
+}
 
 // =============================================================================
 // STATE
 // =============================================================================
 
+const initialBuilding = createInitialBuilding();
+
 const state = proxy<BuildingState>({
-  rooms: createInitialRooms(),
+  junctions: initialBuilding.junctions,
+  walls: initialBuilding.walls,
+  rooms: initialBuilding.rooms,
   selectedWallId: null,
   hoveredWallId: null,
 });
@@ -120,95 +175,171 @@ export function useBuilding() {
 }
 
 // =============================================================================
-// GEOMETRY UTILITIES
+// GRAPH UTILITIES
 // =============================================================================
 
 /**
- * Get edges from a polygon room
+ * Get wall type based on room assignments
  */
-function getRoomEdges(room: Room): { start: Vertex; end: Vertex; roomId: string }[] {
-  const edges: { start: Vertex; end: Vertex; roomId: string }[] = [];
-  const vertices = room.vertices;
-  
-  for (let i = 0; i < vertices.length; i++) {
-    const start = vertices[i];
-    const end = vertices[(i + 1) % vertices.length];
-    edges.push({ start, end, roomId: room.id });
-  }
-  
-  return edges;
+function getWallType(wall: Wall): "exterior" | "interior" {
+  return (wall.leftRoomId !== null && wall.rightRoomId !== null) ? "interior" : "exterior";
 }
 
 /**
- * Normalize an edge so start is always "less than" end
- * For horizontal edges: smaller x first
- * For vertical edges: smaller z first
+ * Get wall orientation based on junction positions
  */
-function normalizeEdge(start: Vertex, end: Vertex): { start: Vertex; end: Vertex; orientation: "horizontal" | "vertical" } {
-  const isHorizontal = Math.abs(start.z - end.z) < 0.01;
-  
-  if (isHorizontal) {
-    if (start.x <= end.x) {
-      return { start, end, orientation: "horizontal" };
-    } else {
-      return { start: end, end: start, orientation: "horizontal" };
-    }
-  } else {
-    if (start.z <= end.z) {
-      return { start, end, orientation: "vertical" };
-    } else {
-      return { start: end, end: start, orientation: "vertical" };
-    }
-  }
+function getWallOrientation(wall: Wall, junctions: Record<string, Junction>): "horizontal" | "vertical" {
+  const start = junctions[wall.startJunctionId];
+  const end = junctions[wall.endJunctionId];
+  return Math.abs(start.z - end.z) < 0.01 ? "horizontal" : "vertical";
+}
+
+/**
+ * Get all walls connected to a junction
+ */
+function getWallsAtJunction(junctionId: string, walls: Record<string, Wall>): Wall[] {
+  return Object.values(walls).filter(
+    w => w.startJunctionId === junctionId || w.endJunctionId === junctionId
+  );
+}
+
+/**
+ * Get the other junction of a wall
+ */
+function getOtherJunction(wall: Wall, junctionId: string): string {
+  return wall.startJunctionId === junctionId ? wall.endJunctionId : wall.startJunctionId;
+}
+
+/**
+ * Check if a wall is perpendicular to another
+ */
+function areWallsPerpendicular(
+  wall1: Wall, 
+  wall2: Wall, 
+  junctions: Record<string, Junction>
+): boolean {
+  const o1 = getWallOrientation(wall1, junctions);
+  const o2 = getWallOrientation(wall2, junctions);
+  return o1 !== o2;
 }
 
 // =============================================================================
-// DERIVE WALLS FROM ROOMS
+// DERIVE WALLS FOR RENDERING (Backward Compatibility)
 // =============================================================================
 
-export function deriveWalls(rooms: Record<string, Room>): DerivedWall[] {
+/**
+ * Convert graph structure to DerivedWall array for rendering
+ * This maintains backward compatibility with existing components
+ */
+export function deriveWalls(rooms: Record<string, LegacyRoom>): DerivedWall[] {
+  // This function now converts from legacy room format to derived walls
+  // It's kept for backward compatibility with tests
+  return deriveWallsFromRooms(rooms);
+}
+
+/**
+ * Derive walls from the current graph state
+ */
+export function deriveWallsFromGraph(): DerivedWall[] {
+  const result: DerivedWall[] = [];
+  
+  for (const wall of Object.values(state.walls)) {
+    const start = state.junctions[wall.startJunctionId];
+    const end = state.junctions[wall.endJunctionId];
+    const type = getWallType(wall);
+    const orientation = getWallOrientation(wall, state.junctions);
+    
+    // Normalize: ensure start < end for consistent IDs
+    let normalizedStart: Vertex;
+    let normalizedEnd: Vertex;
+    
+    if (orientation === "horizontal") {
+      if (start.x <= end.x) {
+        normalizedStart = { x: start.x, z: start.z };
+        normalizedEnd = { x: end.x, z: end.z };
+      } else {
+        normalizedStart = { x: end.x, z: end.z };
+        normalizedEnd = { x: start.x, z: start.z };
+      }
+    } else {
+      if (start.z <= end.z) {
+        normalizedStart = { x: start.x, z: start.z };
+        normalizedEnd = { x: end.x, z: end.z };
+      } else {
+        normalizedStart = { x: end.x, z: end.z };
+        normalizedEnd = { x: start.x, z: start.z };
+      }
+    }
+    
+    const roomIds = [wall.leftRoomId, wall.rightRoomId].filter(Boolean) as string[];
+    
+    // Generate ID in same format as old system for compatibility
+    const position = orientation === "horizontal" ? normalizedStart.z : normalizedStart.x;
+    const rangeStart = orientation === "horizontal" ? normalizedStart.x : normalizedStart.z;
+    const rangeEnd = orientation === "horizontal" ? normalizedEnd.x : normalizedEnd.z;
+    const derivedId = `wall-${orientation}-${position.toFixed(4)}-${rangeStart.toFixed(4)}-${rangeEnd.toFixed(4)}`;
+    
+    result.push({
+      id: derivedId,
+      type,
+      orientation,
+      start: normalizedStart,
+      end: normalizedEnd,
+      roomIds,
+    });
+  }
+  
+  return result;
+}
+
+/**
+ * Legacy function: derive walls from room polygon vertices
+ * Kept for backward compatibility with existing tests
+ */
+function deriveWallsFromRooms(rooms: Record<string, LegacyRoom>): DerivedWall[] {
   const walls: DerivedWall[] = [];
   
-  // Collect all edges with their normalized form AND direction
-  // Direction is important: for interior walls, edges must face each other (opposite directions)
   type EdgeInfo = {
     roomId: string;
     orientation: "horizontal" | "vertical";
-    position: number; // z for horizontal, x for vertical
-    start: number;    // x for horizontal, z for vertical (normalized: start < end)
+    position: number;
+    start: number;
     end: number;
-    direction: 1 | -1; // +1 if original went positive direction, -1 if negative
+    direction: 1 | -1;
   };
   
   const allEdges: EdgeInfo[] = [];
   
   for (const room of Object.values(rooms)) {
-    const edges = getRoomEdges(room);
-    for (const edge of edges) {
-      const normalized = normalizeEdge(edge.start, edge.end);
+    const vertices = room.vertices;
+    for (let i = 0; i < vertices.length; i++) {
+      const start = vertices[i];
+      const end = vertices[(i + 1) % vertices.length];
       
-      if (normalized.orientation === "horizontal") {
-        // For horizontal edges, direction is based on x movement
-        // If original went left-to-right (x increasing), direction = +1
-        const direction = edge.end.x > edge.start.x ? 1 : -1;
+      const isHorizontal = Math.abs(start.z - end.z) < 0.01;
+      
+      if (isHorizontal) {
+        const direction = end.x > start.x ? 1 : -1;
+        const normStart = Math.min(start.x, end.x);
+        const normEnd = Math.max(start.x, end.x);
         allEdges.push({
           roomId: room.id,
           orientation: "horizontal",
-          position: normalized.start.z,
-          start: normalized.start.x,
-          end: normalized.end.x,
+          position: start.z,
+          start: normStart,
+          end: normEnd,
           direction: direction as 1 | -1,
         });
       } else {
-        // For vertical edges, direction is based on z movement
-        // If original went top-to-bottom (z increasing), direction = +1
-        const direction = edge.end.z > edge.start.z ? 1 : -1;
+        const direction = end.z > start.z ? 1 : -1;
+        const normStart = Math.min(start.z, end.z);
+        const normEnd = Math.max(start.z, end.z);
         allEdges.push({
           roomId: room.id,
           orientation: "vertical",
-          position: normalized.start.x,
-          start: normalized.start.z,
-          end: normalized.end.z,
+          position: start.x,
+          start: normStart,
+          end: normEnd,
           direction: direction as 1 | -1,
         });
       }
@@ -232,7 +363,6 @@ export function deriveWalls(rooms: Record<string, Room>): DerivedWall[] {
     const orientation = edges[0].orientation;
     const position = edges[0].position;
     
-    // Collect all segment points
     const points = new Set<number>();
     for (const edge of edges) {
       points.add(edge.start);
@@ -240,14 +370,12 @@ export function deriveWalls(rooms: Record<string, Room>): DerivedWall[] {
     }
     const sortedPoints = Array.from(points).sort((a, b) => a - b);
     
-    // For each sub-segment, determine which rooms it belongs to
     for (let i = 0; i < sortedPoints.length - 1; i++) {
       const segStart = sortedPoints[i];
       const segEnd = sortedPoints[i + 1];
       
-      // Find edges that contain this segment, tracking direction
-      const positiveEdges: string[] = []; // rooms with edges going in positive direction
-      const negativeEdges: string[] = []; // rooms with edges going in negative direction
+      const positiveEdges: string[] = [];
+      const negativeEdges: string[] = [];
       
       for (const edge of edges) {
         if (edge.start <= segStart + 0.01 && edge.end >= segEnd - 0.01) {
@@ -259,38 +387,14 @@ export function deriveWalls(rooms: Record<string, Room>): DerivedWall[] {
         }
       }
       
-      // Interior wall detection:
-      // For clockwise polygons, the "inside" of the room is on the RIGHT side of each edge.
-      // 
-      // For VERTICAL edges at position x:
-      //   - Positive direction (z increasing, going down) → inside is at x- (left)
-      //   - Negative direction (z decreasing, going up) → inside is at x+ (right)
-      //   - Opposite directions → insides face TOWARD each other (one left, one right of wall)
-      //   - This IS an interior wall!
-      //
-      // For HORIZONTAL edges at position z:
-      //   - Positive direction (x increasing, going right) → inside is at z+ (below)
-      //   - Negative direction (x decreasing, going left) → inside is at z- (above)
-      //   - Opposite directions → insides face AWAY from each other (one above, one below)
-      //   - This is NOT an interior wall!
-      //
-      // So for VERTICAL walls: opposite directions = interior
-      // For HORIZONTAL walls: SAME direction from different rooms = interior
-      
-      // Get unique rooms for each direction
       const uniquePositive = [...new Set(positiveEdges)];
       const uniqueNegative = [...new Set(negativeEdges)];
-      
-      // Remove rooms that have BOTH directions on this segment (it's a notch in their boundary)
-      // These rooms don't count for interior wall detection
       const positiveOnly = uniquePositive.filter(r => !uniqueNegative.includes(r));
       const negativeOnly = uniqueNegative.filter(r => !uniquePositive.includes(r));
       
       let isInterior = false;
       
       if (orientation === "vertical") {
-        // Vertical walls: different rooms with opposite directions = interior
-        // (their interiors face toward each other)
         for (const posRoom of positiveOnly) {
           for (const negRoom of negativeOnly) {
             if (posRoom !== negRoom) {
@@ -301,19 +405,12 @@ export function deriveWalls(rooms: Record<string, Room>): DerivedWall[] {
           if (isInterior) break;
         }
       } else {
-        // Horizontal walls: different rooms with SAME direction = interior
-        // (because same direction means their interiors face the same way,
-        //  which only happens when rooms are stacked vertically and share a wall)
-        if (positiveOnly.length >= 2) {
-          isInterior = true;
-        } else if (negativeOnly.length >= 2) {
+        if (positiveOnly.length >= 2 || negativeOnly.length >= 2) {
           isInterior = true;
         }
       }
       
-      // Combine all rooms that have this edge
       const containingRooms = [...new Set([...positiveEdges, ...negativeEdges])];
-      
       if (containingRooms.length === 0) continue;
       
       let start: Vertex, end: Vertex;
@@ -375,6 +472,109 @@ export function findWallAtPosition(
   return null;
 }
 
+/**
+ * Find the internal wall by its derived ID
+ */
+function findWallByDerivedId(derivedId: string): Wall | null {
+  // Parse the derived ID to find matching wall
+  const derivedWalls = deriveWallsFromGraph();
+  const derivedWall = derivedWalls.find(w => w.id === derivedId);
+  if (!derivedWall) return null;
+  
+  // Find the corresponding internal wall
+  for (const wall of Object.values(state.walls)) {
+    const start = state.junctions[wall.startJunctionId];
+    const end = state.junctions[wall.endJunctionId];
+    
+    const wallStart = { x: Math.min(start.x, end.x), z: Math.min(start.z, end.z) };
+    const wallEnd = { x: Math.max(start.x, end.x), z: Math.max(start.z, end.z) };
+    const derivedStart = { x: Math.min(derivedWall.start.x, derivedWall.end.x), z: Math.min(derivedWall.start.z, derivedWall.end.z) };
+    const derivedEnd = { x: Math.max(derivedWall.start.x, derivedWall.end.x), z: Math.max(derivedWall.start.z, derivedWall.end.z) };
+    
+    if (
+      Math.abs(wallStart.x - derivedStart.x) < 0.01 &&
+      Math.abs(wallStart.z - derivedStart.z) < 0.01 &&
+      Math.abs(wallEnd.x - derivedEnd.x) < 0.01 &&
+      Math.abs(wallEnd.z - derivedEnd.z) < 0.01
+    ) {
+      return wall;
+    }
+  }
+  
+  return null;
+}
+
+// =============================================================================
+// CONSTRAINT CHECKING
+// =============================================================================
+
+/**
+ * Check if moving a wall would violate constraints
+ * Returns true if the move is allowed
+ */
+function canMoveWall(
+  wall: Wall,
+  direction: "up" | "down" | "left" | "right",
+  delta: number
+): boolean {
+  const type = getWallType(wall);
+  const orientation = getWallOrientation(wall, state.junctions);
+  
+  // For interior walls, check exterior corner constraints
+  if (type === "interior") {
+    const startJunction = state.junctions[wall.startJunctionId];
+    const endJunction = state.junctions[wall.endJunctionId];
+    
+    // Determine which room shrinks
+    const movingPositive = delta > 0;
+    // For vertical walls: positive delta = moving right
+    // For horizontal walls: positive delta = moving down
+    const shrinkingRoomId = movingPositive ? wall.rightRoomId : wall.leftRoomId;
+    
+    if (!shrinkingRoomId) return true;
+    
+    // Check both endpoints for exterior corners
+    const junctionsToCheck = [wall.startJunctionId, wall.endJunctionId];
+    
+    for (const junctionId of junctionsToCheck) {
+      const junction = state.junctions[junctionId];
+      const connectedWalls = getWallsAtJunction(junctionId, state.walls);
+      
+      // If this junction has only 2 walls (the current wall + one other),
+      // and the other wall is perpendicular, check if it blocks movement
+      if (connectedWalls.length >= 2) {
+        for (const otherWall of connectedWalls) {
+          if (otherWall.id === wall.id) continue;
+          
+          const otherType = getWallType(otherWall);
+          const isPerpendicular = areWallsPerpendicular(wall, otherWall, state.junctions);
+          
+          if (isPerpendicular && otherType === "exterior") {
+            // There's a perpendicular exterior wall at this junction
+            // This is an exterior corner - check if it blocks the move
+            
+            // The shrinking room would be blocked if:
+            // - The perpendicular wall belongs to the shrinking room
+            // - Moving would push the interior wall past this corner
+            
+            const otherBelongsToShrinking = 
+              otherWall.leftRoomId === shrinkingRoomId || 
+              otherWall.rightRoomId === shrinkingRoomId;
+            
+            if (otherBelongsToShrinking) {
+              // Check if the shrinking room's boundary at this point is exactly at the wall position
+              // If so, we can't move past this exterior corner
+              return false;
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  return true;
+}
+
 // =============================================================================
 // ACTIONS
 // =============================================================================
@@ -393,342 +593,66 @@ export const actions = {
   },
 
   /**
-   * Move a wall by adjusting room vertices
-   * 
-   * Three cases to handle:
-   * 1. Full edge move: Room's edge exactly matches the wall segment
-   *    -> Simply move the boundary vertices
-   * 2. Partial edge move: Wall is a subsegment of room's edge
-   *    -> Insert step vertices to create a notch (ONLY for exterior walls)
-   * 3. No match: Room doesn't have this wall as an edge
-   *    -> Skip (shouldn't happen if wall.roomIds is correct)
-   * 
-   * IMPORTANT: Interior walls can ONLY move if ALL rooms have a full edge match.
-   * This prevents interior walls from moving past exterior wall corners.
+   * Move a wall by adjusting its junction positions
+   * This is the new simplified version using the graph structure
    */
   moveWall(wallId: string, direction: "up" | "down" | "left" | "right"): string | null {
-    const walls = deriveWalls(state.rooms);
-    const wall = walls.find(w => w.id === wallId);
-    if (!wall) {
-      return null;
-    }
-
-    const isHorizontal = wall.orientation === "horizontal";
+    // Find the wall by its derived ID
+    const wall = findWallByDerivedId(wallId);
+    if (!wall) return null;
+    
+    const type = getWallType(wall);
+    const orientation = getWallOrientation(wall, state.junctions);
+    
+    // Validate direction
+    const isHorizontal = orientation === "horizontal";
     const isValidDirection = isHorizontal 
       ? (direction === "up" || direction === "down")
       : (direction === "left" || direction === "right");
 
-    if (!isValidDirection) {
+    if (!isValidDirection) return null;
+
+    const moveStep = type === "exterior" ? EXTERIOR_MOVE_STEP : INTERIOR_MOVE_STEP;
+    const delta = (direction === "up" || direction === "left") ? -moveStep : moveStep;
+
+    // Check constraints
+    if (!canMoveWall(wall, direction, delta)) {
       return null;
     }
 
-    const moveStep = wall.type === "exterior" ? EXTERIOR_MOVE_STEP : INTERIOR_MOVE_STEP;
-
-    let delta = 0;
-    if (direction === "up" || direction === "left") {
-      delta = -moveStep;
+    // Move the junctions
+    const startJunction = state.junctions[wall.startJunctionId];
+    const endJunction = state.junctions[wall.endJunctionId];
+    
+    if (isHorizontal) {
+      // Move in Z direction
+      startJunction.z += delta;
+      endJunction.z += delta;
     } else {
-      delta = moveStep;
+      // Move in X direction
+      startJunction.x += delta;
+      endJunction.x += delta;
     }
 
-    const wallPosition = isHorizontal ? wall.start.z : wall.start.x;
-    const wallRangeStart = isHorizontal 
-      ? Math.min(wall.start.x, wall.end.x) 
-      : Math.min(wall.start.z, wall.end.z);
-    const wallRangeEnd = isHorizontal 
-      ? Math.max(wall.start.x, wall.end.x) 
-      : Math.max(wall.start.z, wall.end.z);
-    const newPosition = wallPosition + delta;
+    // Return new wall ID (recalculated based on new position)
+    const newDerivedWalls = deriveWallsFromGraph();
+    const movedWall = newDerivedWalls.find(w => {
+      const start = state.junctions[wall.startJunctionId];
+      const end = state.junctions[wall.endJunctionId];
+      const wStart = { x: Math.min(w.start.x, w.end.x), z: Math.min(w.start.z, w.end.z) };
+      const wEnd = { x: Math.max(w.start.x, w.end.x), z: Math.max(w.start.z, w.end.z) };
+      const wallStart = { x: Math.min(start.x, end.x), z: Math.min(start.z, end.z) };
+      const wallEnd = { x: Math.max(start.x, end.x), z: Math.max(start.z, end.z) };
+      
+      return (
+        Math.abs(wStart.x - wallStart.x) < 0.01 &&
+        Math.abs(wStart.z - wallStart.z) < 0.01 &&
+        Math.abs(wEnd.x - wallEnd.x) < 0.01 &&
+        Math.abs(wEnd.z - wallEnd.z) < 0.01
+      );
+    });
 
-    // For interior walls, check that the move doesn't push past exterior corners.
-    //
-    // Two checks are needed:
-    // 1. The shrinking room must have a FULL EDGE MATCH at the current wall position
-    // 2. The shrinking room must NOT have any obstructions at the new position
-    //
-    // Example 1: wall at x=4.5 from z=0→6
-    // - Room1 has edge at x=4.5 from z=0→6 (full match) - can shrink left
-    // - Room2 has edge at x=4.5 from z=0→9 (partial, wall only covers z=0→6)
-    //   At z=6 there's an exterior corner - Room2 can't shrink right
-    //
-    // Example 2: after moving wall left to x=4.4, Room2 has a step at x=4.5, z=6
-    // - Room2 now has edge at x=4.4 from z=0→6 (full match for wall)
-    // - BUT Room2 has a vertex at (4.5, 6) which is at the new position
-    // - Moving right to x=4.5 would conflict with this vertex - blocked
-    if (wall.type === "interior") {
-      for (const roomId of wall.roomIds) {
-        const room = state.rooms[roomId];
-        if (!room) continue;
-
-        // Determine if this room is on the shrinking side
-        const roomCenter = isHorizontal
-          ? room.vertices.reduce((sum, v) => sum + v.z, 0) / room.vertices.length
-          : room.vertices.reduce((sum, v) => sum + v.x, 0) / room.vertices.length;
-        
-        const roomIsOnPositiveSide = roomCenter > wallPosition;
-        const movingPositive = delta > 0;
-        
-        const roomShrinks = (movingPositive && roomIsOnPositiveSide) || 
-                           (!movingPositive && !roomIsOnPositiveSide);
-        
-        if (!roomShrinks) {
-          continue; // This room expands - no constraint needed
-        }
-
-        // Check 1: The shrinking room must have a full edge match at current position
-        let hasFullEdgeMatch = false;
-        
-        for (let i = 0; i < room.vertices.length; i++) {
-          const v1 = room.vertices[i];
-          const v2 = room.vertices[(i + 1) % room.vertices.length];
-          
-          const isEdgeOnWallLine = isHorizontal
-            ? (Math.abs(v1.z - wallPosition) < 0.01 && Math.abs(v2.z - wallPosition) < 0.01)
-            : (Math.abs(v1.x - wallPosition) < 0.01 && Math.abs(v2.x - wallPosition) < 0.01);
-          
-          if (!isEdgeOnWallLine) continue;
-          
-          const edgeMin = isHorizontal ? Math.min(v1.x, v2.x) : Math.min(v1.z, v2.z);
-          const edgeMax = isHorizontal ? Math.max(v1.x, v2.x) : Math.max(v1.z, v2.z);
-          
-          // Check if this edge exactly matches the wall range
-          if (Math.abs(edgeMin - wallRangeStart) < 0.01 && Math.abs(edgeMax - wallRangeEnd) < 0.01) {
-            hasFullEdgeMatch = true;
-            break;
-          }
-        }
-        
-        if (!hasFullEdgeMatch) {
-          return null;
-        }
-
-        // Check 2: The shrinking room must not have obstructions at the new position
-        // Look for any vertices at newPosition within the wall range
-        // EXCLUDING vertices that are currently on the wall (they will move with it)
-        for (const v of room.vertices) {
-          const vPosition = isHorizontal ? v.z : v.x;
-          const vCoord = isHorizontal ? v.x : v.z;
-          
-          // Skip vertices that are on the current wall line (they'll be moved)
-          if (Math.abs(vPosition - wallPosition) < 0.01) {
-            continue;
-          }
-          
-          // Check if this vertex is at the new wall position
-          if (Math.abs(vPosition - newPosition) < 0.01) {
-            // Check if it's within the wall range (not just at boundaries)
-            if (vCoord > wallRangeStart + 0.01 && vCoord < wallRangeEnd - 0.01) {
-              // Vertex is strictly inside the wall range at new position - obstruction
-              return null;
-            }
-            // Also check if it's at a boundary but indicates an exterior corner
-            // A vertex at (newPosition, wallRangeEnd) is an obstruction if the room
-            // extends beyond wallRangeEnd at that position
-            if (Math.abs(vCoord - wallRangeEnd) < 0.01 || Math.abs(vCoord - wallRangeStart) < 0.01) {
-              // Check if room has more extent at this endpoint
-              for (const v2 of room.vertices) {
-                const v2Position = isHorizontal ? v2.z : v2.x;
-                const v2Coord = isHorizontal ? v2.x : v2.z;
-                if (Math.abs(v2Position - newPosition) < 0.01 && Math.abs(v2Coord - vCoord) > 0.01) {
-                  // Room has another vertex at newPosition beyond this point - exterior corner
-                  return null;
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    let moved = false;
-
-    // For each room that owns this wall
-    for (const roomId of wall.roomIds) {
-      const room = state.rooms[roomId];
-      if (!room) continue;
-
-      // Find the edge(s) in this room that contain the wall segment
-      // An edge is on the wall line if both vertices are at wallPosition
-      for (let i = 0; i < room.vertices.length; i++) {
-        const v1 = room.vertices[i];
-        const v2 = room.vertices[(i + 1) % room.vertices.length];
-        
-        const isEdgeOnWallLine = isHorizontal
-          ? (Math.abs(v1.z - wallPosition) < 0.01 && Math.abs(v2.z - wallPosition) < 0.01)
-          : (Math.abs(v1.x - wallPosition) < 0.01 && Math.abs(v2.x - wallPosition) < 0.01);
-        
-        if (!isEdgeOnWallLine) continue;
-        
-        const edgeMin = isHorizontal ? Math.min(v1.x, v2.x) : Math.min(v1.z, v2.z);
-        const edgeMax = isHorizontal ? Math.max(v1.x, v2.x) : Math.max(v1.z, v2.z);
-        
-        // Check if wall range overlaps with this edge
-        if (wallRangeEnd <= edgeMin + 0.01 || wallRangeStart >= edgeMax - 0.01) {
-          // No overlap
-          continue;
-        }
-        
-        // Determine if this is a full edge match or partial
-        const isFullEdgeMatch = 
-          Math.abs(edgeMin - wallRangeStart) < 0.01 && 
-          Math.abs(edgeMax - wallRangeEnd) < 0.01;
-        
-        if (isFullEdgeMatch) {
-          // CASE 1: Full edge move - just move the boundary vertices
-          if (isHorizontal) {
-            room.vertices[i].z = newPosition;
-            room.vertices[(i + 1) % room.vertices.length].z = newPosition;
-          } else {
-            room.vertices[i].x = newPosition;
-            room.vertices[(i + 1) % room.vertices.length].x = newPosition;
-          }
-          moved = true;
-          break; // Done with this room
-        } else {
-          // CASE 2: Partial edge - need to insert/modify vertices
-          // The wall is a subsegment of this edge
-          // 
-          // Key insight: we need to ensure vertices exist at wallRangeStart and wallRangeEnd,
-          // then move the vertices within that range to the new position.
-          
-          const newVerts: Vertex[] = [];
-          const nextVertexIndex = (i + 1) % room.vertices.length;
-          
-          for (let j = 0; j < room.vertices.length; j++) {
-            const curr = room.vertices[j];
-            const next = room.vertices[(j + 1) % room.vertices.length];
-            
-            if (j !== i) {
-              // Not the edge we're modifying
-              // But also skip if this vertex is the END of the modified edge
-              // (it will be handled by the edge modification)
-              if (j === nextVertexIndex) {
-                // Check if this vertex is ON the wall line and within wall range
-                // If so, it's being replaced by the moved segment
-                const vertOnWallLine = isHorizontal
-                  ? Math.abs(curr.z - wallPosition) < 0.01
-                  : Math.abs(curr.x - wallPosition) < 0.01;
-                const vertCoord = isHorizontal ? curr.x : curr.z;
-                const vertInWallRange = vertCoord >= wallRangeStart - 0.01 && vertCoord <= wallRangeEnd + 0.01;
-                
-                if (vertOnWallLine && vertInWallRange) {
-                  // Skip this vertex - it's being replaced
-                  continue;
-                }
-              }
-              newVerts.push({ ...curr });
-            } else {
-              // This is the edge we need to modify
-              // The edge goes from curr to next along the wall line
-              // We need to:
-              // 1. Keep the part before wallRangeStart at original position
-              // 2. Move the part from wallRangeStart to wallRangeEnd to newPosition
-              // 3. Keep the part after wallRangeEnd at original position
-              
-              const currCoord = isHorizontal ? curr.x : curr.z;
-              const nextCoord = isHorizontal ? next.x : next.z;
-              const goingPositive = nextCoord > currCoord;
-              
-              if (goingPositive) {
-                // Edge goes from smaller to larger coordinate
-                // curr is at edgeMin, next is at edgeMax
-                
-                // Add curr if it's before wallRangeStart
-                if (currCoord < wallRangeStart - 0.01) {
-                  newVerts.push({ ...curr });
-                  // Add point at wallRangeStart on original line
-                  if (isHorizontal) {
-                    newVerts.push({ x: wallRangeStart, z: wallPosition });
-                  } else {
-                    newVerts.push({ x: wallPosition, z: wallRangeStart });
-                  }
-                }
-                
-                // Add the moved segment
-                if (isHorizontal) {
-                  newVerts.push({ x: wallRangeStart, z: newPosition });
-                  newVerts.push({ x: wallRangeEnd, z: newPosition });
-                } else {
-                  newVerts.push({ x: newPosition, z: wallRangeStart });
-                  newVerts.push({ x: newPosition, z: wallRangeEnd });
-                }
-                
-                // Add point at wallRangeEnd on original line if there's more edge after
-                if (nextCoord > wallRangeEnd + 0.01) {
-                  if (isHorizontal) {
-                    newVerts.push({ x: wallRangeEnd, z: wallPosition });
-                  } else {
-                    newVerts.push({ x: wallPosition, z: wallRangeEnd });
-                  }
-                }
-              } else {
-                // Edge goes from larger to smaller coordinate
-                // curr is at edgeMax, next is at edgeMin
-                
-                // Add curr if it's after wallRangeEnd
-                if (currCoord > wallRangeEnd + 0.01) {
-                  newVerts.push({ ...curr });
-                  // Add point at wallRangeEnd on original line
-                  if (isHorizontal) {
-                    newVerts.push({ x: wallRangeEnd, z: wallPosition });
-                  } else {
-                    newVerts.push({ x: wallPosition, z: wallRangeEnd });
-                  }
-                }
-                
-                // Add the moved segment (in reverse order since we're going negative)
-                if (isHorizontal) {
-                  newVerts.push({ x: wallRangeEnd, z: newPosition });
-                  newVerts.push({ x: wallRangeStart, z: newPosition });
-                } else {
-                  newVerts.push({ x: newPosition, z: wallRangeEnd });
-                  newVerts.push({ x: newPosition, z: wallRangeStart });
-                }
-                
-                // Add point at wallRangeStart on original line if there's more edge before
-                if (nextCoord < wallRangeStart - 0.01) {
-                  if (isHorizontal) {
-                    newVerts.push({ x: wallRangeStart, z: wallPosition });
-                  } else {
-                    newVerts.push({ x: wallPosition, z: wallRangeStart });
-                  }
-                }
-              }
-            }
-          }
-          
-          // Clean up duplicate consecutive vertices
-          const cleaned: Vertex[] = [];
-          for (const v of newVerts) {
-            const prev = cleaned[cleaned.length - 1];
-            if (!prev || Math.abs(prev.x - v.x) > 0.01 || Math.abs(prev.z - v.z) > 0.01) {
-              cleaned.push(v);
-            }
-          }
-          // Check if first and last are the same (closed polygon)
-          if (cleaned.length > 1) {
-            const first = cleaned[0];
-            const last = cleaned[cleaned.length - 1];
-            if (Math.abs(first.x - last.x) < 0.01 && Math.abs(first.z - last.z) < 0.01) {
-              cleaned.pop();
-            }
-          }
-          
-          if (cleaned.length >= 3) {
-            room.vertices = cleaned;
-            moved = true;
-          }
-          break; // Done with this room
-        }
-      }
-    }
-
-    if (moved) {
-      const newWallId = `wall-${wall.orientation}-${newPosition.toFixed(4)}-${wallRangeStart.toFixed(4)}-${wallRangeEnd.toFixed(4)}`;
-      return newWallId;
-    }
-
-    return wallId;
+    return movedWall?.id ?? wallId;
   },
 
   moveSelectedWall(direction: "up" | "down" | "left" | "right") {
@@ -742,31 +666,31 @@ export const actions = {
   },
 
   resetBuilding() {
-    state.rooms = createInitialRooms();
+    const initial = createInitialBuilding();
+    state.junctions = initial.junctions;
+    state.walls = initial.walls;
+    state.rooms = initial.rooms;
     state.selectedWallId = null;
     state.hoveredWallId = null;
   },
 };
 
 // =============================================================================
-// COMPATIBILITY LAYER
+// COMPATIBILITY LAYER - Legacy types and functions
 // =============================================================================
 
-export type Wall = {
+// Legacy Wall type for Wall3D component
+export type LegacyWall = {
   id: string;
   type: "exterior" | "interior";
   start: string;
   end: string;
 };
 
-export type Junction = {
-  id: string;
-  x: number;
-  z: number;
-};
+// Re-export Junction for Wall3D (already exported above)
 
 export function getWallAsLegacyFormat(wall: DerivedWall): {
-  wall: Wall;
+  wall: LegacyWall;
   startJunction: Junction;
   endJunction: Junction;
 } {
@@ -788,4 +712,42 @@ export function getWallAsLegacyFormat(wall: DerivedWall): {
       z: wall.end.z,
     },
   };
+}
+
+// For backward compatibility with Building3D that needs rooms in legacy format
+export function getRoomsAsLegacyFormat(): Record<string, LegacyRoom> {
+  const result: Record<string, LegacyRoom> = {};
+  
+  for (const room of Object.values(state.rooms)) {
+    // Reconstruct vertices from walls
+    const vertices: Vertex[] = [];
+    
+    // Follow walls in order to build polygon
+    for (const wallId of room.wallIds) {
+      const wall = state.walls[wallId];
+      if (!wall) continue;
+      
+      const startJunction = state.junctions[wall.startJunctionId];
+      const endJunction = state.junctions[wall.endJunctionId];
+      
+      // Determine which direction we're going around the room
+      // For now, add start junction (we'll dedupe later)
+      const isOnLeft = wall.leftRoomId === room.id;
+      
+      if (isOnLeft) {
+        // Wall goes in opposite direction for this room
+        vertices.push({ x: endJunction.x, z: endJunction.z });
+      } else {
+        vertices.push({ x: startJunction.x, z: startJunction.z });
+      }
+    }
+    
+    result[room.id] = {
+      id: room.id,
+      name: room.name,
+      vertices,
+    };
+  }
+  
+  return result;
 }

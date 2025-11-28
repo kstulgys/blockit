@@ -4,7 +4,7 @@ import { useRef } from "react";
 import * as THREE from "three";
 import type { ThreeEvent } from "@react-three/fiber";
 import {
-  type Wall,
+  type LegacyWall,
   type Junction,
   getWallThickness,
   WALL_HEIGHT,
@@ -19,7 +19,7 @@ const COLORS = {
 };
 
 type Wall3DProps = {
-  wall: Wall;
+  wall: LegacyWall;
   startJunction: Junction;
   endJunction: Junction;
   isSelected: boolean;
