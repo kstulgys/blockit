@@ -511,6 +511,15 @@ function findWallByDerivedId(derivedId: string): Wall | null {
 /**
  * Check if moving a wall would violate constraints
  * Returns true if the move is allowed
+ * 
+ * The key constraint for interior walls:
+ * - The shrinking room must have its boundary at the current wall position along the ENTIRE wall length
+ * - If there's an exterior wall on the same line beyond the interior wall's endpoints,
+ *   that's an exterior corner and the move is blocked
+ * 
+ * Example: Interior wall at x=4.5 from z=0 to z=6
+ * - Room1 has boundary at x=4.5 from z=0 to z=6 (full match) - can shrink
+ * - Room2 has boundary at x=4.5 from z=0 to z=9 (extends beyond wall) - exterior corner at z=6, blocked
  */
 function canMoveWall(
   wall: Wall,
@@ -527,45 +536,41 @@ function canMoveWall(
     
     // Determine which room shrinks
     const movingPositive = delta > 0;
-    // For vertical walls: positive delta = moving right
-    // For horizontal walls: positive delta = moving down
+    // For vertical walls: positive delta = moving right, shrinking room is on the right
+    // For horizontal walls: positive delta = moving down, shrinking room is below
     const shrinkingRoomId = movingPositive ? wall.rightRoomId : wall.leftRoomId;
     
     if (!shrinkingRoomId) return true;
     
-    // Check both endpoints for exterior corners
+    // Check both endpoints for exterior corners that would block the move
+    // An exterior corner exists when there's a COLLINEAR exterior wall 
+    // (same orientation, same position) that extends beyond this interior wall
     const junctionsToCheck = [wall.startJunctionId, wall.endJunctionId];
     
     for (const junctionId of junctionsToCheck) {
-      const junction = state.junctions[junctionId];
       const connectedWalls = getWallsAtJunction(junctionId, state.walls);
       
-      // If this junction has only 2 walls (the current wall + one other),
-      // and the other wall is perpendicular, check if it blocks movement
-      if (connectedWalls.length >= 2) {
-        for (const otherWall of connectedWalls) {
-          if (otherWall.id === wall.id) continue;
+      for (const otherWall of connectedWalls) {
+        if (otherWall.id === wall.id) continue;
+        
+        const otherType = getWallType(otherWall);
+        const otherOrientation = getWallOrientation(otherWall, state.junctions);
+        
+        // Check for COLLINEAR exterior walls (same orientation, forms an L-corner)
+        // This happens when the shrinking room has an exterior wall that continues
+        // beyond the interior wall's endpoint
+        if (otherOrientation === orientation && otherType === "exterior") {
+          // This is a collinear exterior wall - it means the shrinking room
+          // has a boundary that extends beyond this interior wall
+          // Check if it belongs to the shrinking room
+          const otherBelongsToShrinking = 
+            otherWall.leftRoomId === shrinkingRoomId || 
+            otherWall.rightRoomId === shrinkingRoomId;
           
-          const otherType = getWallType(otherWall);
-          const isPerpendicular = areWallsPerpendicular(wall, otherWall, state.junctions);
-          
-          if (isPerpendicular && otherType === "exterior") {
-            // There's a perpendicular exterior wall at this junction
-            // This is an exterior corner - check if it blocks the move
-            
-            // The shrinking room would be blocked if:
-            // - The perpendicular wall belongs to the shrinking room
-            // - Moving would push the interior wall past this corner
-            
-            const otherBelongsToShrinking = 
-              otherWall.leftRoomId === shrinkingRoomId || 
-              otherWall.rightRoomId === shrinkingRoomId;
-            
-            if (otherBelongsToShrinking) {
-              // Check if the shrinking room's boundary at this point is exactly at the wall position
-              // If so, we can't move past this exterior corner
-              return false;
-            }
+          if (otherBelongsToShrinking) {
+            // The shrinking room has an exterior wall on the same line
+            // This means there's an exterior corner - block the move
+            return false;
           }
         }
       }
