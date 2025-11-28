@@ -1,181 +1,101 @@
-import { type Wall, GRID_SIZE, actions, useBuilding } from "~/utils/use-building";
-import { ThreeEvent } from "@react-three/fiber";
-import { useMemo } from "react";
+"use client";
+
+import { useRef } from "react";
 import * as THREE from "three";
+import type { ThreeEvent } from "@react-three/fiber";
+import {
+  type Wall,
+  type Junction,
+  getWallThickness,
+  WALL_HEIGHT,
+} from "~/utils/use-building";
 
-interface Wall3DProps {
+// Colors
+const COLORS = {
+  exteriorWall: "#d4d4d4",
+  interiorWall: "#a3a3a3",
+  selectedWall: "#3b82f6",
+  hoveredWall: "#60a5fa",
+};
+
+type Wall3DProps = {
   wall: Wall;
-  floorId: string;
-}
+  startJunction: Junction;
+  endJunction: Junction;
+  isSelected: boolean;
+  isHovered: boolean;
+  onSelectAction: (wallId: string, shiftKey: boolean) => void;
+  onHoverAction: (wallId: string | null) => void;
+};
 
-export function Wall3D({ wall, floorId }: Wall3DProps) {
-  const building = useBuilding();
-  const { start, end, thickness, height } = wall;
-  const isSelected = building.selectedWallId === wall.id;
+export function Wall3D({
+  wall,
+  startJunction,
+  endJunction,
+  isSelected,
+  isHovered,
+  onSelectAction,
+  onHoverAction,
+}: Wall3DProps) {
+  const meshRef = useRef<THREE.Mesh>(null);
 
-  // Get floor data for connectivity
-  const floor = building.floors[floorId];
+  // Calculate wall geometry
+  const thickness = getWallThickness(wall.type);
+  const height = WALL_HEIGHT;
 
-  // Check connections at each end
-  const startKey = `${start.x},${start.y}`;
-  const endKey = `${end.x},${end.y}`;
+  // Calculate position (center of wall)
+  const centerX = (startJunction.x + endJunction.x) / 2;
+  const centerZ = (startJunction.z + endJunction.z) / 2;
+  const centerY = height / 2; // Walls start at ground level
 
-  // For split wall segments, only apply miters at 90-degree corners (not at segment junctions)
-  const checkConnection = (pointKey: string) => {
-    const connectedWallIds = floor.connectivity[pointKey] || [];
-    if (connectedWallIds.length <= 1) return false;
-
-    // If this wall is a segment, check if connected walls are also segments from same parent
-    if (wall.parentWallId) {
-      // Check if any connected wall is NOT a sibling segment
-      for (const connectedId of connectedWallIds) {
-        if (connectedId === wall.id) continue;
-        const connectedWall = floor.walls[connectedId];
-        // If connected to a non-segment or segment from different parent, it's a 90-degree corner
-        if (!connectedWall || connectedWall.parentWallId !== wall.parentWallId) {
-          return true;
-        }
-      }
-      // All connected walls are sibling segments - no miter needed
-      return false;
-    }
-
-    return true;
-  };
-
-  const startConnected = checkConnection(startKey);
-  const endConnected = checkConnection(endKey);
-
-
-  // Convert grid coordinates to world coordinates
-  const startX = start.x * GRID_SIZE;
-  const startZ = start.y * GRID_SIZE;
-  const endX = end.x * GRID_SIZE;
-  const endZ = end.y * GRID_SIZE;
-
-  // Calculate wall dimensions and position
-  const dx = endX - startX;
-  const dz = endZ - startZ;
-  const baseLength = Math.sqrt(dx * dx + dz * dz);
+  // Calculate length and rotation
+  const dx = endJunction.x - startJunction.x;
+  const dz = endJunction.z - startJunction.z;
+  const length = Math.sqrt(dx * dx + dz * dz);
   const angle = Math.atan2(dz, dx);
 
-  // Extend wall by half thickness (150mm) at connected ends
-  const halfThickness = thickness / 2;
-  const startExtension = startConnected ? halfThickness : 0;
-  const endExtension = endConnected ? halfThickness : 0;
-  const totalLength = baseLength + startExtension + endExtension;
+  // Determine color based on state
+  let color = wall.type === "exterior" ? COLORS.exteriorWall : COLORS.interiorWall;
+  if (isSelected) {
+    color = COLORS.selectedWall;
+  } else if (isHovered) {
+    color = COLORS.hoveredWall;
+  }
 
-  // Adjust center position to account for extensions
-  const extensionOffset = (endExtension - startExtension) / 2;
-  const centerX = (startX + endX) / 2 + Math.cos(angle) * extensionOffset;
-  const centerY = height / 2;
-  const centerZ = (startZ + endZ) / 2 + Math.sin(angle) * extensionOffset;
-
-  // Create custom geometry with 45-degree miter cuts at connected ends
-  const geometry = useMemo(() => {
-    const halfLen = totalLength / 2;
-    const halfHeight = height / 2;
-    const halfThick = thickness / 2;
-
-    const positions: number[] = [];
-    const indices: number[] = [];
-
-    // Simple rule:
-    // - Front face (z=-halfThick) always extends to full length
-    // - Back face (z=+halfThick) is shortened by thickness at connected ends
-    // This creates a consistent 45-degree diagonal cut
-
-    const startFrontX = -halfLen;
-    const startBackX = startConnected ? -halfLen + thickness : -halfLen;
-
-    const endFrontX = +halfLen;
-    const endBackX = endConnected ? +halfLen - thickness : +halfLen;
-
-    // Bottom vertices (y = -halfHeight)
-    positions.push(
-      startFrontX, -halfHeight, -halfThick,   // 0: start front bottom
-      startBackX, -halfHeight, +halfThick,    // 1: start back bottom
-      endBackX, -halfHeight, +halfThick,      // 2: end back bottom
-      endFrontX, -halfHeight, -halfThick      // 3: end front bottom
-    );
-
-    // Top vertices (y = +halfHeight)
-    positions.push(
-      startFrontX, +halfHeight, -halfThick,   // 4: start front top
-      startBackX, +halfHeight, +halfThick,    // 5: start back top
-      endBackX, +halfHeight, +halfThick,      // 6: end back top
-      endFrontX, +halfHeight, -halfThick      // 7: end front top
-    );
-
-    // Define faces
-    // Front face (z = -halfThick)
-    indices.push(0, 3, 7, 0, 7, 4);
-    // Back face (z = +halfThick)
-    indices.push(1, 5, 6, 1, 6, 2);
-    // Top face
-    indices.push(4, 7, 6, 4, 6, 5);
-    // Bottom face
-    indices.push(0, 1, 2, 0, 2, 3);
-    // Start end face (diagonal if connected)
-    indices.push(0, 4, 5, 0, 5, 1);
-    // End face (diagonal if connected)
-    indices.push(3, 2, 6, 3, 6, 7);
-
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geo.setIndex(indices);
-    geo.computeVertexNormals();
-
-    return geo;
-  }, [totalLength, height, thickness, startConnected, endConnected]);
-
-  const handleClick = (e: ThreeEvent<MouseEvent>) => {
-    e.stopPropagation();
-    actions.selectWall(wall.id, floorId);
+  const handleClick = (event: ThreeEvent<MouseEvent>) => {
+    event.stopPropagation();
+    onSelectAction(wall.id, event.nativeEvent.shiftKey);
   };
 
-  // Determine wall color
-  const getWallColor = () => {
-    if (isSelected) return "#3b82f6";
-    if (wall.isAttachmentSegment) return "#a0a0a0"; // Gray for attachment segments
-    return wall.isExterior ? "#8b7355" : "#d4c5b9";
+  const handlePointerOver = (event: ThreeEvent<PointerEvent>) => {
+    event.stopPropagation();
+    onHoverAction(wall.id);
+    document.body.style.cursor = "pointer";
+  };
+
+  const handlePointerOut = () => {
+    onHoverAction(null);
+    document.body.style.cursor = "auto";
   };
 
   return (
-    <group>
-      <mesh
-        position={[centerX, centerY, centerZ]}
-        rotation={[0, -angle, 0]}
-        onClick={handleClick}
-        geometry={geometry}
-        castShadow
-        receiveShadow
-      >
-        <meshStandardMaterial
-          color={getWallColor()}
-          roughness={0.8}
-          metalness={0}
-          side={THREE.DoubleSide}
-          depthWrite={true}
-          depthTest={true}
-        />
-      </mesh>
-
-      {/* Selection outline */}
-      {isSelected && (
-        <mesh
-          position={[centerX, centerY, centerZ]}
-          rotation={[0, -angle, 0]}
-          geometry={geometry}
-        >
-          <meshBasicMaterial
-            color="#60a5fa"
-            transparent
-            opacity={0.3}
-            depthTest={false}
-          />
-        </mesh>
-      )}
-    </group>
+    <mesh
+      ref={meshRef}
+      position={[centerX, centerY, centerZ]}
+      rotation={[0, -angle, 0]}
+      onClick={handleClick}
+      onPointerOver={handlePointerOver}
+      onPointerOut={handlePointerOut}
+      castShadow
+      receiveShadow
+    >
+      {/* Wall geometry: length along X, height along Y, thickness along Z */}
+      <boxGeometry args={[length, height, thickness]} />
+      <meshStandardMaterial
+        color={color}
+        roughness={0.8}
+        metalness={0.1}
+      />
+    </mesh>
   );
 }

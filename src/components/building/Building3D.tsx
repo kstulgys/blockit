@@ -1,21 +1,36 @@
 "use client";
 
-import { useEffect } from "react";
-import { useBuilding, actions } from "~/utils/use-building";
+import { useEffect, useMemo } from "react";
+import { useBuilding, actions, deriveWalls, getWallAsLegacyFormat } from "~/utils/use-building";
 import { Wall3D } from "./Wall3D";
 
 export function Building3D() {
   const building = useBuilding();
 
+  // Derive walls from rooms (memoized for performance)
+  const walls = useMemo(() => {
+    // Convert readonly snapshot to mutable for deriveWalls
+    const mutableRooms: Record<string, { id: string; name: string; vertices: { x: number; z: number }[] }> = {};
+    for (const [key, room] of Object.entries(building.rooms)) {
+      mutableRooms[key] = {
+        id: room.id,
+        name: room.name,
+        vertices: room.vertices.map(v => ({ x: v.x, z: v.z })),
+      };
+    }
+    return deriveWalls(mutableRooms);
+  }, [building.rooms]);
+
+  // Keyboard event handler for wall movement
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Deselect on Escape
       if (e.key === "Escape") {
-        actions.selectWall(null);
+        actions.clearSelection();
         return;
       }
 
-      // Move selected wall with arrow keys
+      // Only handle arrow keys if we have a selection
       if (!building.selectedWallId) return;
 
       switch (e.key) {
@@ -42,23 +57,37 @@ export function Building3D() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [building.selectedWallId]);
 
+  // Handle wall selection
+  const handleWallSelect = (wallId: string, _shiftKey: boolean) => {
+    // For simplicity, just single selection (no multi-select with rooms model)
+    if (building.selectedWallId === wallId) {
+      actions.clearSelection();
+    } else {
+      actions.selectWall(wallId);
+    }
+  };
+
+  // Handle wall hover
+  const handleWallHover = (wallId: string | null) => {
+    actions.setHoveredWall(wallId);
+  };
+
   return (
     <group>
-      {building.floorIds.map((floorId) => {
-        const floor = building.floors[floorId];
+      {walls.map((wall) => {
+        const { wall: legacyWall, startJunction, endJunction } = getWallAsLegacyFormat(wall);
+
         return (
-          <group key={floor.id} position={[0, floor.level * floor.height, 0]}>
-            {/* Render exterior walls */}
-            {floor.wallIds.map((wallId) => {
-              const wall = floor.walls[wallId];
-              return <Wall3D key={wall.id} wall={wall} floorId={floorId} />;
-            })}
-            {/* Render interior walls */}
-            {floor.interiorWallIds.map((wallId) => {
-              const wall = floor.interiorWalls[wallId];
-              return <Wall3D key={wall.id} wall={wall} floorId={floorId} />;
-            })}
-          </group>
+          <Wall3D
+            key={wall.id}
+            wall={legacyWall}
+            startJunction={startJunction}
+            endJunction={endJunction}
+            isSelected={building.selectedWallId === wall.id}
+            isHovered={building.hoveredWallId === wall.id}
+            onSelectAction={handleWallSelect}
+            onHoverAction={handleWallHover}
+          />
         );
       })}
     </group>

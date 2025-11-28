@@ -28,8 +28,8 @@ export default function Home() {
   return (
     <ChakraBox>
       <ChakraBox as="main">
-        <SimpleGrid columns={2} gap={2} h="100vh" w="100vw">
-          <NodeEditor />
+        <SimpleGrid columns={1} gap={0} h="100vh" w="100vw">
+          {/* <NodeEditor /> */}
           <BlockitModel />
         </SimpleGrid>
       </ChakraBox>
@@ -40,10 +40,13 @@ export default function Home() {
 function ClickToRotate() {
   const { camera, raycaster, scene, gl } = useThree();
   const controlsRef = useRef<OrbitControlsType | null>(null);
+  const [rotationCenter, setRotationCenter] =
+    React.useState<THREE.Vector3 | null>(null);
 
   const handleClick = (event: MouseEvent) => {
-    // Shift + Click to set rotation center
-    if (!event.shiftKey) return;
+    // Only update rotation center on middle mouse button or Ctrl+Click
+    // This prevents unwanted jumping during regular wall selection
+    if (event.button !== 1 && !event.ctrlKey) return;
 
     const canvas = gl.domElement;
     const rect = canvas.getBoundingClientRect();
@@ -55,32 +58,79 @@ function ClickToRotate() {
     // Update raycaster
     raycaster.setFromCamera(new THREE.Vector2(x, y), camera);
 
-    // Raycast against all objects in the scene
-    const intersects = raycaster.intersectObjects(scene.children, true);
+    // Raycast against all objects in the scene (excluding the invisible ground plane)
+    const intersects = raycaster
+      .intersectObjects(scene.children, true)
+      .filter((hit) => hit.object.visible && hit.object.type === "Mesh");
 
     if (intersects.length > 0 && controlsRef.current) {
-      // Set orbit controls target to the clicked point
+      // Get the first solid object hit (should be a wall)
       const point = intersects[0].point;
+
+      // Smoothly transition to new target without jumping
+      // Store current camera position relative to old target
+      const oldTarget = controlsRef.current.target.clone();
+      const cameraOffset = camera.position.clone().sub(oldTarget);
+
+      // Set new target
       controlsRef.current.target.copy(point);
+
+      // Maintain camera's relative position
+      camera.position.copy(point).add(cameraOffset);
+
       controlsRef.current.update();
+
+      // Update visual indicator
+      setRotationCenter(point.clone());
+
+      // Auto-hide indicator after 2 seconds
+      setTimeout(() => setRotationCenter(null), 2000);
     }
   };
 
   React.useEffect(() => {
     const canvas = gl.domElement;
-    canvas.addEventListener("click", handleClick);
-    return () => canvas.removeEventListener("click", handleClick);
-  }, [gl]);
+    canvas.addEventListener("mousedown", handleClick);
+    return () => canvas.removeEventListener("mousedown", handleClick);
+  }, [gl, camera, raycaster, scene]);
 
   return (
-    <OrbitControls
-      ref={controlsRef}
-      makeDefault
-      enableDamping
-      dampingFactor={0.05}
-      minDistance={2}
-      maxDistance={50}
-    />
+    <>
+      <OrbitControls
+        ref={controlsRef}
+        makeDefault
+        enableDamping
+        dampingFactor={0.1}
+        rotateSpeed={0.8}
+        zoomSpeed={1.2}
+        panSpeed={0.8}
+        minDistance={2}
+        maxDistance={50}
+        minPolarAngle={0}
+        maxPolarAngle={Math.PI / 2}
+      />
+
+      {/* Visual indicator for rotation center */}
+      {rotationCenter && (
+        <group position={rotationCenter}>
+          {/* Small sphere at rotation point */}
+          <mesh>
+            <sphereGeometry args={[0.1, 16, 16]} />
+            <meshBasicMaterial color="#60a5fa" transparent opacity={0.6} />
+          </mesh>
+          {/* Ring around rotation point */}
+          <mesh rotation={[Math.PI / 2, 0, 0]}>
+            <ringGeometry args={[0.15, 0.2, 32]} />
+            <meshBasicMaterial
+              color="#3b82f6"
+              transparent
+              opacity={0.4}
+              side={THREE.DoubleSide}
+            />
+          </mesh>
+        </group>
+      )}
+    </>
   );
 }
 
@@ -89,8 +139,64 @@ function BlockitModel() {
     actions.selectWall(null);
   };
 
+  const handleReset = () => {
+    actions.resetBuilding();
+  };
+
   return (
-    <div id="canvas-container" style={{ width: "100%", height: "100%" }}>
+    <div
+      id="canvas-container"
+      style={{ width: "100%", height: "100%", position: "relative" }}
+    >
+      {/* Help text overlay */}
+      <div
+        style={{
+          position: "absolute",
+          top: "10px",
+          left: "10px",
+          background: "rgba(0, 0, 0, 0.7)",
+          color: "white",
+          padding: "8px 12px",
+          borderRadius: "6px",
+          fontSize: "12px",
+          zIndex: 100,
+          pointerEvents: "none",
+          fontFamily: "monospace",
+        }}
+      >
+        <div style={{ fontWeight: "bold", marginBottom: "4px" }}>Controls</div>
+        <div>Click wall to select</div>
+        <div>Shift+Click for multi-select</div>
+        <div>Arrow keys to move walls</div>
+        <div>Escape to deselect</div>
+        <div style={{ marginTop: "4px", borderTop: "1px solid #555", paddingTop: "4px" }}>
+          Ctrl+Click to set rotation center
+        </div>
+        <div>Drag to rotate, Scroll to zoom</div>
+      </div>
+
+      {/* Reset button */}
+      <button
+        onClick={handleReset}
+        style={{
+          position: "absolute",
+          top: "10px",
+          right: "10px",
+          background: "#ef4444",
+          color: "white",
+          padding: "8px 16px",
+          borderRadius: "6px",
+          fontSize: "12px",
+          fontWeight: "bold",
+          zIndex: 100,
+          border: "none",
+          cursor: "pointer",
+          fontFamily: "monospace",
+        }}
+      >
+        Reset Building
+      </button>
+
       <Canvas
         camera={{ position: [15, 15, 15], fov: 50 }}
         shadows
