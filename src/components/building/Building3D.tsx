@@ -1,23 +1,32 @@
 "use client";
 
 import { useEffect, useMemo } from "react";
-import { useBuilding, actions, deriveWallsFromGraph, getWallAsLegacyFormat } from "~/utils/use-building";
+import { useBuilding, actions, deriveWallsFromRooms, getWallAsLegacyFormat } from "~/utils/use-building";
+import type { Room } from "~/utils/use-building";
 import { Wall3D } from "./Wall3D";
 
 export function Building3D() {
   const building = useBuilding();
 
-  // Derive walls from graph structure (memoized for performance)
+  // Derive walls from room polygons
   const walls = useMemo(() => {
-    // Trigger re-computation when junctions or walls change
-    const _ = building.junctions;
-    const __ = building.walls;
-    return deriveWallsFromGraph();
-  }, [building.junctions, building.walls]);
+    // Convert readonly snapshot to mutable for deriveWallsFromRooms
+    const mutableRooms: Record<string, Room> = {};
+    for (const [id, room] of Object.entries(building.rooms)) {
+      mutableRooms[id] = {
+        id: room.id,
+        name: room.name,
+        vertices: room.vertices.map(v => ({ x: v.x, z: v.z })),
+      };
+    }
+    return deriveWallsFromRooms(mutableRooms);
+  }, [building.rooms]);
 
   // Keyboard event handler for wall movement
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      console.log("=== keydown ===", e.key, "selectedWallId:", building.selectedWallId); // DEBUG
+      
       // Deselect on Escape
       if (e.key === "Escape") {
         actions.clearSelection();
@@ -53,6 +62,7 @@ export function Building3D() {
 
   // Handle wall selection
   const handleWallSelect = (wallId: string, _shiftKey: boolean) => {
+    console.log("=== wall clicked ===", wallId); // DEBUG
     // For simplicity, just single selection (no multi-select with rooms model)
     if (building.selectedWallId === wallId) {
       actions.clearSelection();
