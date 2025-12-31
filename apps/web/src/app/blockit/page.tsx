@@ -191,6 +191,51 @@ function findWallBetweenCorners(
   return null;
 }
 
+function getWallsUsingCorner(cornerId: string): Wall[] {
+  const { walls } = buildingStore;
+  return Object.values(walls).filter(
+    (wall) => wall.startCornerId === cornerId || wall.endCornerId === cornerId
+  );
+}
+
+type MovementConstraint = {
+  canMoveX: boolean;
+  canMoveY: boolean;
+};
+
+function getCornerMovementConstraint(cornerId: string): MovementConstraint {
+  const { walls, corners } = buildingStore;
+  const connectedWalls = getWallsUsingCorner(cornerId);
+  const corner = corners[cornerId];
+  if (!corner) return { canMoveX: true, canMoveY: true };
+
+  let canMoveX = true;
+  let canMoveY = true;
+
+  for (const wall of connectedWalls) {
+    if (wall.type !== "exterior") continue;
+
+    const otherCornerId =
+      wall.startCornerId === cornerId ? wall.endCornerId : wall.startCornerId;
+    const otherCorner = corners[otherCornerId];
+    if (!otherCorner) continue;
+
+    const dx = Math.abs(otherCorner.x - corner.x);
+    const dy = Math.abs(otherCorner.y - corner.y);
+
+    if (dy > dx * 2) {
+      canMoveX = false;
+    } else if (dx > dy * 2) {
+      canMoveY = false;
+    } else {
+      canMoveX = false;
+      canMoveY = false;
+    }
+  }
+
+  return { canMoveX, canMoveY };
+}
+
 const actions = {
   selectWall(wallId: string | null) {
     buildingStore.selectedWallId = wallId;
@@ -218,14 +263,38 @@ const actions = {
     const isHorizontal = dx > dy;
     const isVertical = dy > dx;
 
-    if (isHorizontal && (direction === "up" || direction === "down")) {
-      const delta = direction === "up" ? step : -step;
-      startCorner.y += delta;
-      endCorner.y += delta;
-    } else if (isVertical && (direction === "left" || direction === "right")) {
-      const delta = direction === "right" ? step : -step;
-      startCorner.x += delta;
-      endCorner.x += delta;
+    const isMovingY = direction === "up" || direction === "down";
+    const isMovingX = direction === "left" || direction === "right";
+
+    if (wall.type === "interior") {
+      const startConstraint = getCornerMovementConstraint(wall.startCornerId);
+      const endConstraint = getCornerMovementConstraint(wall.endCornerId);
+
+      if (isHorizontal && isMovingY) {
+        if (!startConstraint.canMoveY || !endConstraint.canMoveY) {
+          return;
+        }
+        const delta = direction === "up" ? step : -step;
+        startCorner.y += delta;
+        endCorner.y += delta;
+      } else if (isVertical && isMovingX) {
+        if (!startConstraint.canMoveX || !endConstraint.canMoveX) {
+          return;
+        }
+        const delta = direction === "right" ? step : -step;
+        startCorner.x += delta;
+        endCorner.x += delta;
+      }
+    } else {
+      if (isHorizontal && isMovingY) {
+        const delta = direction === "up" ? step : -step;
+        startCorner.y += delta;
+        endCorner.y += delta;
+      } else if (isVertical && isMovingX) {
+        const delta = direction === "right" ? step : -step;
+        startCorner.x += delta;
+        endCorner.x += delta;
+      }
     }
   },
 
@@ -275,18 +344,23 @@ const actions = {
       const n1 = s1.length;
       const n2 = s2.length;
       
-      const startIdx1 = s1.indexOf(wallStartId);
       const endIdx1 = s1.indexOf(wallEndId);
       const startIdx2 = s2.indexOf(wallStartId);
-      const endIdx2 = s2.indexOf(wallEndId);
+      
+      const remainingWalls = Object.values(walls).filter(w => w.id !== selectedWallId);
+      const isCornerUsedByOtherWalls = (cornerId: string) => 
+        remainingWalls.some(w => w.startCornerId === cornerId || w.endCornerId === cornerId);
       
       const mergedCorners: string[] = [];
       
       let idx = endIdx1;
       for (let count = 0; count < n1; count++) {
         const corner = s1[idx];
-        if (corner !== wallStartId && corner !== wallEndId) {
-          mergedCorners.push(corner);
+        const isSharedCorner = corner === wallStartId || corner === wallEndId;
+        if (!isSharedCorner || isCornerUsedByOtherWalls(corner)) {
+          if (!mergedCorners.includes(corner)) {
+            mergedCorners.push(corner);
+          }
         }
         idx = (idx + 1) % n1;
       }
@@ -294,7 +368,8 @@ const actions = {
       idx = startIdx2;
       for (let count = 0; count < n2; count++) {
         const corner = s2[idx];
-        if (corner !== wallStartId && corner !== wallEndId) {
+        const isSharedCorner = corner === wallStartId || corner === wallEndId;
+        if (!isSharedCorner || isCornerUsedByOtherWalls(corner)) {
           if (!mergedCorners.includes(corner)) {
             mergedCorners.push(corner);
           }
@@ -317,6 +392,50 @@ const actions = {
 
     delete buildingStore.walls[selectedWallId];
 
+    const mergeExteriorWallsAtCorner = (cornerId: string) => {
+      const wallsAtCorner = Object.values(buildingStore.walls).filter(
+        (w) => w.startCornerId === cornerId || w.endCornerId === cornerId
+      );
+      
+      if (wallsAtCorner.length === 2) {
+        const [wall1, wall2] = wallsAtCorner;
+        if (wall1.type === "exterior" && wall2.type === "exterior") {
+          const other1 = wall1.startCornerId === cornerId ? wall1.endCornerId : wall1.startCornerId;
+          const other2 = wall2.startCornerId === cornerId ? wall2.endCornerId : wall2.startCornerId;
+          
+          const corner = buildingStore.corners[cornerId];
+          const otherCorner1 = buildingStore.corners[other1];
+          const otherCorner2 = buildingStore.corners[other2];
+          
+          if (corner && otherCorner1 && otherCorner2) {
+            const dx1 = Math.abs(otherCorner1.x - corner.x);
+            const dy1 = Math.abs(otherCorner1.y - corner.y);
+            const dx2 = Math.abs(otherCorner2.x - corner.x);
+            const dy2 = Math.abs(otherCorner2.y - corner.y);
+            
+            const isWall1Horizontal = dx1 > dy1;
+            const isWall2Horizontal = dx2 > dy2;
+            
+            if (isWall1Horizontal === isWall2Horizontal) {
+              buildingStore.walls[wall1.id] = {
+                ...wall1,
+                startCornerId: other1,
+                endCornerId: other2,
+              };
+              delete buildingStore.walls[wall2.id];
+              
+              delete buildingStore.corners[cornerId];
+              for (const space of Object.values(buildingStore.spaces)) {
+                space.cornerIds = space.cornerIds.filter((id) => id !== cornerId);
+              }
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    };
+
     const remainingWalls = Object.values(buildingStore.walls);
     const wallsUsingStart = remainingWalls.filter(
       (w) => w.startCornerId === wallStartId || w.endCornerId === wallStartId
@@ -330,12 +449,17 @@ const actions = {
       for (const space of Object.values(buildingStore.spaces)) {
         space.cornerIds = space.cornerIds.filter((id) => id !== wallStartId);
       }
+    } else {
+      mergeExteriorWallsAtCorner(wallStartId);
     }
+    
     if (wallsUsingEnd.length === 0) {
       delete buildingStore.corners[wallEndId];
       for (const space of Object.values(buildingStore.spaces)) {
         space.cornerIds = space.cornerIds.filter((id) => id !== wallEndId);
       }
+    } else {
+      mergeExteriorWallsAtCorner(wallEndId);
     }
 
     buildingStore.selectedWallId = null;
