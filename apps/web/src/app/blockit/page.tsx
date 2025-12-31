@@ -66,6 +66,9 @@ enum Controls {
   left = "left",
   right = "right",
   deselect = "deselect",
+  split = "split",
+  tab = "tab",
+  delete = "delete",
 }
 
 const keyboardMap = [
@@ -74,6 +77,9 @@ const keyboardMap = [
   { name: Controls.left, keys: ["ArrowLeft", "KeyA"] },
   { name: Controls.right, keys: ["ArrowRight", "KeyD"] },
   { name: Controls.deselect, keys: ["Escape"] },
+  { name: Controls.split, keys: ["Space"] },
+  { name: Controls.tab, keys: ["Tab"] },
+  { name: Controls.delete, keys: ["Delete", "Backspace"] },
 ];
 
 /**
@@ -140,6 +146,51 @@ function createInitialState(): BuildingState {
 
 const buildingStore = proxy<BuildingState>(createInitialState());
 
+function generateId(prefix: string): string {
+  return `${prefix}${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+}
+
+function snapToGrid(value: number, gridSize: number): number {
+  return Math.round(value / gridSize) * gridSize;
+}
+
+function findSpaceContainingWall(wallId: string): Space | null {
+  const { walls, spaces, corners } = buildingStore;
+  const wall = walls[wallId];
+  if (!wall) return null;
+
+  for (const space of Object.values(spaces)) {
+    const cornerIds = space.cornerIds;
+    for (let i = 0; i < cornerIds.length; i++) {
+      const c1 = cornerIds[i];
+      const c2 = cornerIds[(i + 1) % cornerIds.length];
+      if (
+        (c1 === wall.startCornerId && c2 === wall.endCornerId) ||
+        (c1 === wall.endCornerId && c2 === wall.startCornerId)
+      ) {
+        return space;
+      }
+    }
+  }
+  return null;
+}
+
+function findWallBetweenCorners(
+  cornerId1: string,
+  cornerId2: string
+): Wall | null {
+  const { walls } = buildingStore;
+  for (const wall of Object.values(walls)) {
+    if (
+      (wall.startCornerId === cornerId1 && wall.endCornerId === cornerId2) ||
+      (wall.startCornerId === cornerId2 && wall.endCornerId === cornerId1)
+    ) {
+      return wall;
+    }
+  }
+  return null;
+}
+
 const actions = {
   selectWall(wallId: string | null) {
     buildingStore.selectedWallId = wallId;
@@ -176,6 +227,353 @@ const actions = {
       startCorner.x += delta;
       endCorner.x += delta;
     }
+  },
+
+  cycleWallSelection() {
+    const { walls, selectedWallId } = buildingStore;
+    const wallIds = Object.keys(walls);
+    if (wallIds.length === 0) return;
+
+    if (!selectedWallId) {
+      buildingStore.selectedWallId = wallIds[0];
+      return;
+    }
+
+    const currentIndex = wallIds.indexOf(selectedWallId);
+    const nextIndex = (currentIndex + 1) % wallIds.length;
+    buildingStore.selectedWallId = wallIds[nextIndex];
+  },
+
+  deleteSelectedWall() {
+    const { selectedWallId, walls, spaces } = buildingStore;
+    if (!selectedWallId) return;
+
+    const wall = walls[selectedWallId];
+    if (!wall) return;
+
+    if (wall.type === "exterior") {
+      return;
+    }
+
+    const wallStartId = wall.startCornerId;
+    const wallEndId = wall.endCornerId;
+
+    const spacesWithBothCorners: Space[] = [];
+    for (const space of Object.values(spaces)) {
+      const hasStart = space.cornerIds.includes(wallStartId);
+      const hasEnd = space.cornerIds.includes(wallEndId);
+      if (hasStart && hasEnd) {
+        spacesWithBothCorners.push(space);
+      }
+    }
+
+    if (spacesWithBothCorners.length === 2) {
+      const [space1, space2] = spacesWithBothCorners;
+      
+      const s1 = [...space1.cornerIds];
+      const s2 = [...space2.cornerIds];
+      const n1 = s1.length;
+      const n2 = s2.length;
+      
+      const startIdx1 = s1.indexOf(wallStartId);
+      const endIdx1 = s1.indexOf(wallEndId);
+      const startIdx2 = s2.indexOf(wallStartId);
+      const endIdx2 = s2.indexOf(wallEndId);
+      
+      const mergedCorners: string[] = [];
+      
+      let idx = endIdx1;
+      for (let count = 0; count < n1; count++) {
+        const corner = s1[idx];
+        if (corner !== wallStartId && corner !== wallEndId) {
+          mergedCorners.push(corner);
+        }
+        idx = (idx + 1) % n1;
+      }
+      
+      idx = startIdx2;
+      for (let count = 0; count < n2; count++) {
+        const corner = s2[idx];
+        if (corner !== wallStartId && corner !== wallEndId) {
+          if (!mergedCorners.includes(corner)) {
+            mergedCorners.push(corner);
+          }
+        }
+        idx = (idx + 1) % n2;
+      }
+      
+      if (mergedCorners.length >= 3) {
+        const mergedSpace: Space = {
+          id: space1.id,
+          name: space1.name,
+          cornerIds: mergedCorners,
+        };
+
+        delete buildingStore.spaces[space1.id];
+        delete buildingStore.spaces[space2.id];
+        buildingStore.spaces[mergedSpace.id] = mergedSpace;
+      }
+    }
+
+    delete buildingStore.walls[selectedWallId];
+
+    const remainingWalls = Object.values(buildingStore.walls);
+    const wallsUsingStart = remainingWalls.filter(
+      (w) => w.startCornerId === wallStartId || w.endCornerId === wallStartId
+    );
+    const wallsUsingEnd = remainingWalls.filter(
+      (w) => w.startCornerId === wallEndId || w.endCornerId === wallEndId
+    );
+
+    if (wallsUsingStart.length === 0) {
+      delete buildingStore.corners[wallStartId];
+      for (const space of Object.values(buildingStore.spaces)) {
+        space.cornerIds = space.cornerIds.filter((id) => id !== wallStartId);
+      }
+    }
+    if (wallsUsingEnd.length === 0) {
+      delete buildingStore.corners[wallEndId];
+      for (const space of Object.values(buildingStore.spaces)) {
+        space.cornerIds = space.cornerIds.filter((id) => id !== wallEndId);
+      }
+    }
+
+    buildingStore.selectedWallId = null;
+  },
+
+  splitAtSelectedWall() {
+    const { selectedWallId, walls, corners, spaces } = buildingStore;
+    if (!selectedWallId) return;
+
+    const wall = walls[selectedWallId];
+    if (!wall) return;
+
+    const space = findSpaceContainingWall(selectedWallId);
+    if (!space) return;
+
+    const startCorner = corners[wall.startCornerId];
+    const endCorner = corners[wall.endCornerId];
+    if (!startCorner || !endCorner) return;
+
+    const origStartCornerId = wall.startCornerId;
+    const origEndCornerId = wall.endCornerId;
+
+    const dx = endCorner.x - startCorner.x;
+    const dy = endCorner.y - startCorner.y;
+    const isHorizontal = Math.abs(dx) > Math.abs(dy);
+
+    const wallGridSize = STEP_SIZE[wall.type];
+    const midX = isHorizontal ? snapToGrid((startCorner.x + endCorner.x) / 2, wallGridSize) : startCorner.x;
+    const midY = isHorizontal ? startCorner.y : snapToGrid((startCorner.y + endCorner.y) / 2, wallGridSize);
+
+    const midCornerId = generateId("c");
+    buildingStore.corners[midCornerId] = { id: midCornerId, x: midX, y: midY };
+
+    const newWallSegmentId = generateId("w");
+    buildingStore.walls[newWallSegmentId] = {
+      id: newWallSegmentId,
+      type: wall.type,
+      startCornerId: origStartCornerId,
+      endCornerId: midCornerId,
+    };
+    buildingStore.walls[selectedWallId] = {
+      ...wall,
+      startCornerId: midCornerId,
+      endCornerId: origEndCornerId,
+    };
+
+    const cornerIds = [...space.cornerIds];
+    const n = cornerIds.length;
+
+    let selectedEdgeIdx = -1;
+    for (let i = 0; i < n; i++) {
+      const curr = cornerIds[i];
+      const next = cornerIds[(i + 1) % n];
+      if (
+        (curr === origStartCornerId && next === origEndCornerId) ||
+        (curr === origEndCornerId && next === origStartCornerId)
+      ) {
+        selectedEdgeIdx = i;
+        break;
+      }
+    }
+
+    if (selectedEdgeIdx === -1) return;
+
+    let oppositeEdgeIdx = -1;
+    for (let i = 0; i < n; i++) {
+      if (i === selectedEdgeIdx) continue;
+
+      const c1 = corners[cornerIds[i]];
+      const c2 = corners[cornerIds[(i + 1) % n]];
+      if (!c1 || !c2) continue;
+
+      const edgeDx = Math.abs(c2.x - c1.x);
+      const edgeDy = Math.abs(c2.y - c1.y);
+
+      if (isHorizontal) {
+        if (edgeDx > edgeDy && c1.y !== startCorner.y) {
+          const minX = Math.min(c1.x, c2.x);
+          const maxX = Math.max(c1.x, c2.x);
+          if (midX >= minX && midX <= maxX) {
+            oppositeEdgeIdx = i;
+            break;
+          }
+        }
+      } else {
+        if (edgeDy > edgeDx && c1.x !== startCorner.x) {
+          const minY = Math.min(c1.y, c2.y);
+          const maxY = Math.max(c1.y, c2.y);
+          if (midY >= minY && midY <= maxY) {
+            oppositeEdgeIdx = i;
+            break;
+          }
+        }
+      }
+    }
+
+    if (oppositeEdgeIdx === -1) {
+      delete buildingStore.corners[midCornerId];
+      delete buildingStore.walls[newWallSegmentId];
+      buildingStore.walls[selectedWallId] = wall;
+      return;
+    }
+
+    const oppEdgeStartId = cornerIds[oppositeEdgeIdx];
+    const oppEdgeEndId = cornerIds[(oppositeEdgeIdx + 1) % n];
+    const oppEdgeStart = corners[oppEdgeStartId];
+
+    const oppCornerId = generateId("c");
+    const oppX = isHorizontal ? midX : oppEdgeStart.x;
+    const oppY = isHorizontal ? oppEdgeStart.y : midY;
+    buildingStore.corners[oppCornerId] = { id: oppCornerId, x: oppX, y: oppY };
+
+    const oppositeWall = findWallBetweenCorners(oppEdgeStartId, oppEdgeEndId);
+    if (oppositeWall) {
+      const oppWallNewSegmentId = generateId("w");
+      buildingStore.walls[oppWallNewSegmentId] = {
+        id: oppWallNewSegmentId,
+        type: oppositeWall.type,
+        startCornerId: oppositeWall.startCornerId,
+        endCornerId: oppCornerId,
+      };
+      buildingStore.walls[oppositeWall.id] = {
+        ...oppositeWall,
+        startCornerId: oppCornerId,
+      };
+    }
+
+    const interiorWallId = generateId("w");
+    buildingStore.walls[interiorWallId] = {
+      id: interiorWallId,
+      type: "interior",
+      startCornerId: midCornerId,
+      endCornerId: oppCornerId,
+    };
+
+    for (const otherSpace of Object.values(buildingStore.spaces)) {
+      if (otherSpace.id === space.id) continue;
+      
+      const otherCorners = otherSpace.cornerIds;
+      const newOtherCorners: string[] = [];
+      
+      for (let i = 0; i < otherCorners.length; i++) {
+        const curr = otherCorners[i];
+        const next = otherCorners[(i + 1) % otherCorners.length];
+        
+        newOtherCorners.push(curr);
+        
+        if (
+          (curr === origStartCornerId && next === origEndCornerId) ||
+          (curr === origEndCornerId && next === origStartCornerId)
+        ) {
+          newOtherCorners.push(midCornerId);
+        }
+        
+        if (
+          (curr === oppEdgeStartId && next === oppEdgeEndId) ||
+          (curr === oppEdgeEndId && next === oppEdgeStartId)
+        ) {
+          newOtherCorners.push(oppCornerId);
+        }
+      }
+      
+      if (newOtherCorners.length !== otherCorners.length) {
+        buildingStore.spaces[otherSpace.id] = {
+          ...otherSpace,
+          cornerIds: newOtherCorners,
+        };
+      }
+    }
+
+    const updatedCornerIds: string[] = [];
+    for (let i = 0; i < n; i++) {
+      updatedCornerIds.push(cornerIds[i]);
+      const next = cornerIds[(i + 1) % n];
+
+      if (
+        (cornerIds[i] === origStartCornerId && next === origEndCornerId) ||
+        (cornerIds[i] === origEndCornerId && next === origStartCornerId)
+      ) {
+        updatedCornerIds.push(midCornerId);
+      }
+
+      if (
+        (cornerIds[i] === oppEdgeStartId && next === oppEdgeEndId) ||
+        (cornerIds[i] === oppEdgeEndId && next === oppEdgeStartId)
+      ) {
+        updatedCornerIds.push(oppCornerId);
+      }
+    }
+
+    const midIdx = updatedCornerIds.indexOf(midCornerId);
+    const oppIdx = updatedCornerIds.indexOf(oppCornerId);
+
+    if (midIdx === -1 || oppIdx === -1) {
+      buildingStore.spaces[space.id] = { ...space, cornerIds: updatedCornerIds };
+      buildingStore.selectedWallId = interiorWallId;
+      return;
+    }
+
+    const m = updatedCornerIds.length;
+    const space1Corners: string[] = [];
+    const space2Corners: string[] = [];
+
+    let idx = midIdx;
+    while (true) {
+      space1Corners.push(updatedCornerIds[idx]);
+      if (idx === oppIdx) break;
+      idx = (idx + 1) % m;
+      if (idx === midIdx) break;
+    }
+
+    idx = oppIdx;
+    while (true) {
+      space2Corners.push(updatedCornerIds[idx]);
+      if (idx === midIdx) break;
+      idx = (idx + 1) % m;
+      if (idx === oppIdx) break;
+    }
+
+    if (space1Corners.length >= 3 && space2Corners.length >= 3) {
+      const space1Id = space.id;
+      const space2Id = generateId("room");
+
+      buildingStore.spaces[space1Id] = {
+        id: space1Id,
+        name: space.name,
+        cornerIds: space1Corners,
+      };
+      buildingStore.spaces[space2Id] = {
+        id: space2Id,
+        name: `Room ${Object.keys(buildingStore.spaces).length + 1}`,
+        cornerIds: space2Corners,
+      };
+    } else {
+      buildingStore.spaces[space.id] = { ...space, cornerIds: updatedCornerIds };
+    }
+
+    buildingStore.selectedWallId = interiorWallId;
   },
 
   resetBuilding() {
@@ -332,6 +730,9 @@ function KeyboardHandler() {
     [Controls.left]: false,
     [Controls.right]: false,
     [Controls.deselect]: false,
+    [Controls.split]: false,
+    [Controls.tab]: false,
+    [Controls.delete]: false,
   });
 
   useEffect(() => {
@@ -353,6 +754,15 @@ function KeyboardHandler() {
       if (keys.deselect && !lastKeyState.current.deselect) {
         actions.selectWall(null);
       }
+      if (keys.split && !lastKeyState.current.split) {
+        actions.splitAtSelectedWall();
+      }
+      if (keys.tab && !lastKeyState.current.tab) {
+        actions.cycleWallSelection();
+      }
+      if (keys.delete && !lastKeyState.current.delete) {
+        actions.deleteSelectedWall();
+      }
 
       lastKeyState.current = {
         [Controls.up]: keys.up,
@@ -360,6 +770,9 @@ function KeyboardHandler() {
         [Controls.left]: keys.left,
         [Controls.right]: keys.right,
         [Controls.deselect]: keys.deselect,
+        [Controls.split]: keys.split,
+        [Controls.tab]: keys.tab,
+        [Controls.delete]: keys.delete,
       };
     };
 
@@ -443,20 +856,28 @@ function UIOverlay() {
   return (
     <div className="absolute inset-0 pointer-events-none">
       <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-sm rounded-lg shadow-lg p-4 pointer-events-auto max-w-xs">
-        <h2 className="font-semibold text-gray-900 mb-2">Building Modeler</h2>
+        <h2 className="font-semibold text-gray-900 mb-2">Gablok Floor Planner</h2>
         <div className="text-sm text-gray-600 space-y-1">
           <p>
-            <span className="font-medium">Click</span> a wall to select it
+            <span className="font-medium">Click</span> wall to select
           </p>
           <p>
-            <span className="font-medium">Arrow keys</span> to move selected
-            wall
+            <span className="font-medium">Tab</span> cycle through walls
           </p>
           <p>
-            <span className="font-medium">Escape</span> to deselect
+            <span className="font-medium">Arrows</span> move selected wall
+          </p>
+          <p>
+            <span className="font-medium">Space</span> split room at wall
+          </p>
+          <p>
+            <span className="font-medium">Delete</span> remove interior wall
+          </p>
+          <p>
+            <span className="font-medium">Escape</span> deselect
           </p>
           <p className="text-xs text-gray-400 mt-2">
-            Exterior walls: 300mm, Interior: 150mm
+            Grid: Exterior 300mm, Interior 150mm
           </p>
         </div>
       </div>
@@ -486,6 +907,16 @@ function UIOverlay() {
             <p className="text-xs text-blue-500 mt-2 italic">
               {wallInfo.movementHint}
             </p>
+            <div className="mt-3 pt-2 border-t border-blue-200 text-xs space-y-1">
+              <p className="text-blue-600">
+                <span className="font-medium">Space</span> - Split room here
+              </p>
+              {wallInfo.type === "interior" && (
+                <p className="text-blue-600">
+                  <span className="font-medium">Delete</span> - Remove this wall
+                </p>
+              )}
+            </div>
           </div>
         </div>
       )}
