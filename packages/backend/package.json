@@ -9,12 +9,13 @@
     "dev:setup": "convex dev --configure --until-success"
   },
   "dependencies": {
-    "convex": "catalog:",
+    "@ai-sdk/google": "^2.0.52",
+    "@ai-sdk/openai": "^2.0.89",
     "@convex-dev/agent": "catalog:",
-    "ai": "^6.0.3",
-    "@ai-sdk/google": "^3.0.1",
-    "better-auth": "catalog:",
     "@convex-dev/better-auth": "catalog:",
+    "ai": "^5.0.29",
+    "better-auth": "catalog:",
+    "convex": "catalog:",
     "dotenv": "catalog:",
     "zod": "catalog:"
   },

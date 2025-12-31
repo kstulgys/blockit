@@ -28,9 +28,9 @@
     "dev:setup": "turbo -F @my-better-t-app/backend dev:setup"
   },
   "dependencies": {
+    "@my-better-t-app/env": "workspace:*",
     "dotenv": "catalog:",
-    "zod": "catalog:",
-    "@my-better-t-app/env": "workspace:*"
+    "zod": "catalog:"
   },
   "devDependencies": {
     "turbo": "^2.6.3",

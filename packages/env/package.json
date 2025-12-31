@@ -12,7 +12,8 @@
     "dotenv": "catalog:"
   },
   "devDependencies": {
-    "typescript": "catalog:",
-    "@my-better-t-app/config": "workspace:*"
+    "@my-better-t-app/config": "workspace:*",
+    "@types/node": "^25.0.3",
+    "typescript": "catalog:"
   }
 }
